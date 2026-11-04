@@ -1,0 +1,4132 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
+<title>Дерево заметок</title>
+<style>
+  :root {
+    --bg: #f4f6fb;
+    --panel: #ffffff;
+    --panel-2: #eef1f8;
+    --text: #1f2733;
+    --muted: #6b7686;
+    --border: #dde3ee;
+    --accent: #4f6df5;
+    --accent-2: #ff8a3d;
+    --accent-3: #2fbf8f;
+    --danger: #e5484d;
+    --shadow: 0 8px 30px rgba(20,30,60,.08);
+    --radius: 14px;
+  }
+  [data-theme="dark"] {
+    --bg: #0f1420;
+    --panel: #171e2e;
+    --panel-2: #1f2940;
+    --text: #e7ecf5;
+    --muted: #8b97ad;
+    --border: #2a3654;
+    --accent: #6f8bff;
+    --accent-2: #ffa15c;
+    --accent-3: #43d6a3;
+    --danger: #ff6b70;
+    --shadow: 0 8px 30px rgba(0,0,0,.4);
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    font-family: 'Segoe UI', system-ui, -apple-system, Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    transition: background .25s, color .25s;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 12px; row-gap: 6px;
+    flex-wrap: wrap; /* иначе на ширине ~721–790px кнопки вылезают за экран */
+    padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--panel);
+  }
+  header h1 { font-size: 20px; margin: 0; font-weight: 700; display: flex; align-items: center; gap: 10px; }
+  .spacer { flex: 1; }
+  button {
+    border: 1px solid var(--border); background: var(--panel-2); color: var(--text);
+    padding: 8px 14px; border-radius: 9px; cursor: pointer; font-size: 13px; font-weight: 600;
+    transition: transform .06s, filter .15s;
+  }
+  button:hover { filter: brightness(.96); }
+  button:active { transform: translateY(1px); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { filter: brightness(1.08); }
+  /* Убираем задержку/двойной тап-зум на интерактивных элементах. */
+  button, .note-card, .node-row, .root-note, .ctx-item, .facet, .tag, .crumb, .palette-item { touch-action: manipulation; }
+  button.icon { padding: 6px 8px; line-height: 1; }
+  button.danger { color: var(--danger); border-color: var(--danger); background: transparent; }
+  main { flex: 1; display: flex; overflow: hidden; }
+  .sidebar {
+    width: 300px; min-width: 220px; max-width: 40%;
+    background: var(--panel); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .search { padding: 12px; border-bottom: 1px solid var(--border); position: relative; }
+  .search input {
+    width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: 9px;
+    background: var(--panel-2); color: var(--text); font-size: 13px;
+  }
+  .search-suggest {
+    position: absolute; left: 12px; right: 12px; top: calc(100% - 6px); z-index: 70;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 9px;
+    box-shadow: var(--shadow); max-height: 220px; overflow: auto; display: none; padding: 4px;
+  }
+  .search-suggest.show { display: block; }
+  .search-suggest .sugg { padding: 7px 10px; border-radius: 7px; cursor: pointer; font-size: 13px; display: flex; justify-content: space-between; gap: 8px; }
+  .search-suggest .sugg:hover, .search-suggest .sugg.active { background: var(--panel-2); }
+  .search-suggest .sugg .cnt { color: var(--muted); font-size: 11px; }
+  /* Панель фасетов (фильтры по тэгам) */
+  .facets { padding: 8px 12px 0; }
+  .facets-toggle { width: 100%; text-align: left; padding: 8px 10px; font-size: 13px; }
+  .facets-toggle #facetsCount { color: var(--muted); font-size: 11px; }
+  .facets-body { display: none; flex-wrap: wrap; gap: 6px; padding: 8px 0; max-height: 200px; overflow: auto; }
+  .facets.open .facets-body { display: flex; }
+  .facet { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 20px; border: 1px solid var(--border); background: var(--panel-2); font-size: 12px; cursor: pointer; }
+  .facet .cnt { color: var(--muted); font-size: 10px; }
+  .facet:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .facets-hint { display: none; color: var(--muted); font-size: 11px; line-height: 1.35; padding: 0 2px 4px; }
+  .facets.open .facets-hint { display: block; }
+  .facet.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .facet.on .cnt { color: rgba(255,255,255,.85); }
+  .facet.excl { background: var(--danger); border-color: var(--danger); color: #fff; }
+  .facets-reset { width: 100%; margin: 6px 0 2px; padding: 6px 10px; font-size: 12px; color: var(--danger); border-color: var(--danger); }
+  /* Сохранённые представления */
+  .views { margin-top: 4px; }
+  .views-list { display: flex; flex-direction: column; gap: 4px; padding: 6px 0; }
+  .view-item { display: flex; align-items: center; gap: 8px; padding: 5px 9px; border-radius: 7px; background: var(--panel-2); font-size: 12px; cursor: pointer; }
+  .view-item .vn { flex: 1; font-weight: 600; }
+  .view-item .vq { color: var(--muted); font-size: 11px; }
+  .view-item .vx { color: var(--danger); cursor: pointer; padding: 0 4px; }
+  .tree { flex: 1; overflow: auto; padding: 8px; }
+  .node-row {
+    display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 8px;
+    cursor: pointer; font-size: 14px;
+  }
+  .node-row:hover { background: var(--panel-2); }
+  .node-row:focus, .root-note:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .node-row.drop-target { outline: 2px dashed var(--accent); background: var(--panel-2); }
+  .node-row.active { background: var(--accent); color: #fff; }
+  .node-row .chevron { width: 18px; text-align: center; font-size: 14px; line-height: 1; flex: 0 0 auto; color: var(--muted); }
+  .node-row.active .chevron { color: inherit; }
+  .node-row .count { margin-left: auto; font-size: 11px; background: var(--panel-2); padding: 1px 7px; border-radius: 10px; color: var(--muted); }
+  .node-row.active .count { background: rgba(255,255,255,.25); color: #fff; }
+  .children { margin-left: 16px; border-left: 1px solid var(--border); padding-left: 2px; }
+  .tree .root-note { margin: 4px 0; padding: 6px 8px; border-radius: 8px; font-size: 13px; color: var(--muted); cursor: pointer; display: flex; align-items: center; gap: 6px; }
+  .tree .root-note:hover { background: var(--panel-2); }
+  .tree .root-note.active { background: var(--accent); color: #fff; font-weight: 600; }
+
+  .content { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .breadcrumbs { padding: 12px 20px; border-bottom: 1px solid var(--border); display: flex; gap: 4px; align-items: center; flex-wrap: wrap; font-size: 14px; }
+  .breadcrumbs .crumb { color: var(--muted); cursor: pointer; }
+  .breadcrumbs .crumb:hover { color: var(--accent); text-decoration: underline; }
+  .breadcrumbs .sep { color: var(--muted); }
+  .breadcrumbs .cnt { font-size: 12px; background: var(--panel-2); padding: 2px 10px; border-radius: 10px; margin-left: 8px; }
+  /* Правая часть: список карточек + полный просмотр выбранной заметки. */
+  .content-split { flex: 1; display: flex; min-height: 0; min-width: 0; }
+  .notes { flex: 1; min-width: 0; overflow: auto; padding: 20px; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; align-content: start; }
+  /* Выбрана заметка: список сужается до одной колонки, справа открывается текст.
+     Отступы, gap и стили карточек не меняем — иначе выбранная карточка «прыгает»
+     в размере в момент открытия просмотра. */
+  .content-split.has-view .notes { flex: 0 0 360px; grid-template-columns: 1fr; border-right: 1px solid var(--border); }
+  .note-view { display: none; flex: 1; min-width: 0; flex-direction: column; overflow: hidden; }
+  .content-split.has-view .note-view { display: flex; }
+  /* Шапка с кнопками закреплена: прокручивается только текст в .nv-scroll. */
+  .note-view .nv-head { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 12px 28px; border-bottom: 1px solid var(--border); background: var(--bg); }
+  .note-view .nv-scroll { flex: 1; min-height: 0; overflow: auto; padding: 20px 28px 60px; }
+  .note-view .nv-head .spacer { flex: 1; }
+  .note-view .nv-close { background: transparent; color: var(--muted); }
+  .note-view .nv-close:hover { color: var(--text); border-color: var(--accent); }
+  .note-view .nv-close-back { display: none; }
+  .note-view h1.nv-title { margin: 0 0 10px; font-size: 24px; line-height: 1.25; word-break: break-word; }
+  .note-view .nv-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); margin-bottom: 16px; }
+  .note-view .nv-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+  .note-view .tag { font-size: 11px; padding: 2px 8px; border-radius: 8px; background: var(--accent); color: #fff; font-weight: 600; }
+  .note-view .tag.clk { cursor: pointer; }
+  .note-view .tag.clk:hover { filter: brightness(1.15); text-decoration: underline; }
+  .note-view .nv-body { font-size: 15px; line-height: 1.65; word-break: break-word; max-width: 78ch; }
+  .note-view .nv-empty { color: var(--muted); font-style: italic; }
+  .note-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: var(--shadow); padding: 16px; cursor: pointer;
+    transition: transform .12s, box-shadow .2s, border-color .2s;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .note-card:hover { transform: translateY(-3px); border-color: var(--accent); }
+  .note-card.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+  .note-card.pinned { border-left: 3px solid var(--accent-2); }
+  .note-card:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .note-card h3 { margin: 0; font-size: 16px; font-weight: 600; word-break: break-word; }
+  .note-card .preview { font-size: 13px; color: var(--muted); white-space: normal; word-break: break-word; flex: 1; max-height: 96px; overflow: hidden; }
+  .note-card .preview mark { background: #ffe58a; color: #333; border-radius: 3px; padding: 0 2px; }
+  /* Общие начертание/отступы заголовков MD, размер и цвет — по контексту */
+  .md-h1, .md-h2, .md-h3 { font-weight: 700; }
+  .note-card .preview .md-h1, .note-card .preview .md-h2, .note-card .preview .md-h3 { color: var(--text); margin: 2px 0; }
+  .note-card .preview .md-h1 { font-size: 15px; }
+  .note-card .preview .md-h2 { font-size: 14px; }
+  .note-card .preview .md-h3 { font-size: 13px; }
+  .note-card .preview ul { margin: 2px 0 2px 16px; padding: 0; }
+  .note-card .preview a { color: var(--accent); text-decoration: underline; }
+  .note-card .tags { display: flex; flex-wrap: wrap; gap: 6px; }
+  .note-card .tag { font-size: 11px; padding: 2px 8px; border-radius: 8px; background: var(--accent); color: #fff; font-weight: 600; }
+  .note-card .dt { font-size: 11px; color: var(--muted); }
+  .empty { color: var(--muted); text-align: center; padding: 60px 20px; grid-column: 1 / -1; }
+  .empty .big { font-size: 40px; margin-bottom: 10px; }
+
+  .modal-mask { position: fixed; inset: 0; background: rgba(10,15,30,.55); display: none; align-items: center; justify-content: center; z-index: 50; padding: 20px; }
+  .modal-mask.show { display: flex; }
+  .modal { background: var(--panel); border-radius: 16px; width: 100%; max-width: 620px; max-height: 90vh; max-height: 90dvh; display: flex; flex-direction: column; box-shadow: var(--shadow); border: 1px solid var(--border); }
+  .modal-head { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
+  .modal-head h2 { margin: 0; font-size: 18px; flex: 1; }
+  .modal-body { padding: 20px; overflow: auto; display: flex; flex-direction: column; gap: 14px; }
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field label { font-size: 13px; font-weight: 600; color: var(--muted); }
+  .field input, .field textarea, .field select { border: 1px solid var(--border); background: var(--panel-2); color: var(--text); border-radius: 9px; padding: 10px 12px; font-size: 14px; font-family: inherit; resize: vertical; }
+  .field select { padding: 8px 10px; font-size: 13px; cursor: pointer; }
+  #sortBtn { width: 100%; text-align: left; padding: 8px 10px; font-size: 13px; }
+  #sortBtn.active { border-color: var(--accent); }
+  .field input:focus, .field textarea:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  .field textarea { min-height: 180px; line-height: 1.5; }
+  .md-mode { padding: 4px 12px; border-radius: 7px; font-size: 12px; font-weight: 600; }
+  .md-mode.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .md-modes { display: flex; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; align-items: center; }
+  .muted-small { font-size: 11px; color: var(--muted); }
+  .hint { font-size: 12px; color: var(--muted); line-height: 1.4; }
+  .sortbar { margin: 8px 12px 0; }
+  .tree-toolbar { display: flex; gap: 6px; padding: 6px 12px; border-bottom: 1px solid var(--border); }
+  .tree-toolbar button { flex: 1; padding: 5px 8px; font-size: 12px; }
+  .modal.narrow { max-width: 420px; }
+  .dialog-msg { font-size: 14px; line-height: 1.5; white-space: pre-wrap; }
+  /* WYSIWYG: тулбар и раздельное поле редактора/предпросмотра */
+  .md-box { border: 1px solid var(--border); border-radius: 9px; overflow: hidden; background: var(--panel); }
+  .md-toolbar { display: flex; flex-wrap: wrap; gap: 2px; padding: 6px 8px; border-bottom: 1px solid var(--border); background: var(--panel-2); align-items: center; }
+  .md-tb { padding: 4px 9px; font-size: 12px; font-weight: 600; border: 1px solid transparent; background: transparent; color: var(--text); border-radius: 6px; line-height: 1.2; }
+  .md-tb:hover { background: var(--panel); border-color: var(--border); }
+  .md-tb em { font-style: italic; }
+  .md-tb s { text-decoration: line-through; }
+  .md-sep { width: 1px; height: 18px; background: var(--border); margin: 0 5px; }
+  .md-body { display: flex; align-items: stretch; min-height: 200px; }
+  .md-body textarea, .md-body #mdPreview { width: 100%; min-height: 200px; border: 0; background: var(--panel); color: var(--text); }
+  .md-body textarea { resize: vertical; }
+  .md-body textarea:focus { outline: none; box-shadow: inset 0 0 0 2px var(--accent); }
+  #mdPreview { padding: 12px; font-size: 14px; line-height: 1.6; overflow: auto; display: none; }
+  .md-body.split textarea, .md-body.split #mdPreview { width: 50%; }
+  .md-body.split #mdPreview { display: block; border-left: 1px solid var(--border); }
+  #mdPreview .md-h1, #mdPreview .md-h2, #mdPreview .md-h3 { margin: 6px 0 3px; }
+  #noteView .md-h1, #noteView .md-h2, #noteView .md-h3 { margin: 14px 0 6px; }
+  #mdPreview .md-h1, #noteView .md-h1 { font-size: 20px; }
+  #mdPreview .md-h2, #noteView .md-h2 { font-size: 17px; }
+  #mdPreview .md-h3, #noteView .md-h3 { font-size: 15px; }
+  .md-ul { padding-left: 18px; margin: 4px 0; }
+  .md-ul li { margin: 2px 0; }
+  .md-ul.todo { list-style: none; padding-left: 2px; }
+  .md-ul.todo li::before { content: attr(data-box); display: inline-block; width: 14px; margin-right: 4px; }
+  #mdPreview .md-quote, #noteView .md-quote { border-left: 3px solid var(--accent-2); padding: 2px 10px; margin: 6px 0; color: var(--muted); background: var(--panel-2); border-radius: 4px; }
+  #mdPreview .md-code, #noteView .md-code { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 2px 6px; font-family: 'Consolas', 'Menlo', monospace; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
+  #mdPreview .md-inline, #noteView .md-inline { background: var(--panel-2); border-radius: 4px; padding: 1px 5px; font-family: 'Consolas', 'Menlo', monospace; font-size: 13px; }
+  #mdPreview .md-hr, #noteView .md-hr { border: 0; border-top: 2px solid var(--border); margin: 10px 0; }
+  /* Широкие таблицы прокручиваются внутри своего блока, а не растягивают страницу. */
+  .md-table-wrap { max-width: 100%; overflow-x: auto; margin: 8px 0; -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }
+  #mdPreview .md-table, #noteView .md-table { border-collapse: collapse; margin: 0; font-size: 13px; }
+  #mdPreview .md-table th, #mdPreview .md-table td,
+  #noteView .md-table th, #noteView .md-table td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
+  #mdPreview .md-table th, #noteView .md-table th { background: var(--panel-2); font-weight: 600; }
+  #mdPreview .md-table thead tr, #noteView .md-table thead tr { background: var(--panel-2); }
+  /* В карточке-превью таблица не помещается осмысленно — показываем текст вокруг неё. */
+  .note-card .preview .md-table-wrap { display: none; }
+  /* Панель поиска/замены в редакторе */
+  .md-findbar { display: none; gap: 6px; padding: 6px 8px; border-bottom: 1px solid var(--border); background: var(--panel-2); flex-wrap: wrap; align-items: center; }
+  .md-findbar.show { display: flex; }
+  .md-findbar input { flex: 1; min-width: 90px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel); color: var(--text); font-size: 12px; }
+  .md-findbar button { padding: 5px 8px; font-size: 12px; }
+  /* Оглавление длинных заметок */
+  .md-toc { display: none; flex-wrap: wrap; gap: 4px; padding: 6px 8px; border-bottom: 1px solid var(--border); background: var(--panel-2); }
+  .md-toc.show { display: flex; }
+  .md-toc .toc-item { font-size: 11px; padding: 2px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--panel); cursor: pointer; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .md-toc .toc-item:hover { border-color: var(--accent); color: var(--accent); }
+  .md-toc .toc-item.t2 { margin-left: 10px; }
+  .md-toc .toc-item.t3 { margin-left: 20px; opacity: .85; }
+  #mdPreview a, #noteView a { color: var(--accent); text-decoration: underline; }
+  #mdPreview del, #noteView del { color: var(--muted); }
+  #mdPreview .md-empty, #noteView .md-empty { color: var(--muted); }
+  .tag-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .tag-badge { display: inline-flex; align-items: center; gap: 6px; background: var(--accent); color: #fff; font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 8px; }
+  /* Общая палитра тэгов (карточки и бейджи) */
+  .note-card .tag:nth-child(3n+2), .tag-badge:nth-child(3n+2){ background: var(--accent-2); }
+  .note-card .tag:nth-child(3n), .tag-badge:nth-child(3n){ background: var(--accent-3); color: #0b2b20; }
+  .tag-badge .x { cursor: pointer; font-weight: 700; opacity: .8; }
+  .tag-badge .x:hover { opacity: 1; }
+  .note-card .tag.clk { cursor: pointer; transition: filter .12s; }
+  .note-card .tag.clk:hover { filter: brightness(1.15); text-decoration: underline; }
+  .tag-hints { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .tag-hint { font-size: 11px; padding: 2px 8px; border-radius: 8px; cursor: pointer; border: 1px dashed var(--border); color: var(--muted); }
+  .tag-hint:hover { border-color: var(--accent); color: var(--accent); }
+  /* Автодополнение в поле ввода тэга */
+  .tag-field { position: relative; }
+  .tag-suggest {
+    position: absolute; left: 0; right: 0; top: calc(100% + 2px); z-index: 75;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 9px;
+    box-shadow: var(--shadow); max-height: 200px; overflow: auto; display: none; padding: 4px;
+  }
+  .tag-suggest.show { display: block; }
+  .tag-suggest .ts { padding: 7px 10px; border-radius: 7px; cursor: pointer; font-size: 13px; display: flex; justify-content: space-between; gap: 8px; }
+  .tag-suggest .ts:hover, .tag-suggest .ts.active { background: var(--panel-2); }
+  .tag-suggest .ts .cnt { color: var(--muted); font-size: 11px; }
+  /* Менеджер тэгов */
+  .tag-manager { display: flex; flex-direction: column; gap: 8px; }
+  .tm-search { padding: 8px 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--panel-2); color: var(--text); font-size: 13px; }
+  .tm-list { display: flex; flex-direction: column; gap: 4px; max-height: 50vh; overflow: auto; }
+  .tm-toolbar { display: flex; flex-wrap: wrap; gap: 6px; }
+  .tm-row.similar { border-color: var(--accent-2); background: rgba(255,138,61,.08); }
+  .tm-row.orphan .tm-name { color: var(--muted); font-style: italic; }
+  /* Командная палитра */
+  .palette-modal { align-self: flex-start; margin-top: 10vh; }
+  .palette-modal .modal-body { gap: 8px; }
+  .palette-list { display: flex; flex-direction: column; gap: 2px; max-height: 50vh; overflow: auto; margin-top: 8px; }
+  .palette-item { padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 13px; display: flex; justify-content: space-between; gap: 8px; }
+  .palette-item:hover, .palette-item.active { background: var(--panel-2); }
+  .palette-item .pi-hint { color: var(--muted); font-size: 11px; }
+  .tm-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--panel); }
+  .tm-row:hover { border-color: var(--accent); }
+  .tm-dot { width: 14px; height: 14px; border-radius: 50%; flex: 0 0 auto; border: 1px solid var(--border); }
+  .tm-name { flex: 1; font-weight: 600; font-size: 14px; word-break: break-word; }
+  .tm-count { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .tm-actions { display: flex; gap: 4px; }
+  .tm-act { padding: 4px 8px; font-size: 12px; border-radius: 7px; border: 1px solid var(--border); background: var(--panel-2); cursor: pointer; line-height: 1.2; }
+  .tm-act:hover { border-color: var(--accent); }
+  .tm-act.danger { color: var(--danger); border-color: var(--danger); }
+  .tm-empty { color: var(--muted); text-align: center; padding: 24px; font-size: 13px; }
+  .tm-colors { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 10px; background: var(--panel-2); border-radius: 8px; }
+  .tm-color { width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--border); cursor: pointer; }
+  .tm-color:hover { transform: scale(1.15); }
+  .modal-foot { padding: 14px 20px; border-top: 1px solid var(--border); display: flex; justify-content: flex-end; gap: 10px; align-items: center; }
+
+  .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(20px); background: var(--text); color: var(--bg); padding: 10px 18px; border-radius: 10px; font-size: 13px; font-weight: 600; opacity: 0; transition: all .25s; z-index: 60; box-shadow: var(--shadow); }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* Контекстное меню */
+  .ctx-menu {
+    position: fixed; z-index: 80; min-width: 200px; display: none;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: var(--shadow); padding: 6px; font-size: 14px; color: var(--text);
+  }
+  .ctx-menu.show { display: block; }
+  .ctx-menu .ctx-item { padding: 8px 12px; border-radius: 7px; cursor: pointer; display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+  .ctx-menu .ctx-item:hover { background: var(--panel-2); }
+  .ctx-menu .ctx-item.danger { color: var(--danger); }
+  .ctx-menu .ctx-item:focus { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .ctx-menu .ctx-sep { height: 1px; background: var(--border); margin: 5px 8px; }
+
+  .burger { display: none; }
+  /* Узкие экраны: просмотр заметки занимает всё место, список скрывается. */
+  @media (max-width: 900px) {
+    .content-split.has-view .notes { display: none; }
+    .note-view .nv-head { padding: 10px 16px; }
+    .note-view .nv-scroll { padding: 14px 16px 48px; }
+    .note-view h1.nv-title { font-size: 20px; }
+    .note-view .nv-close-x { display: none; }
+    .note-view .nv-close-back { display: inline; }
+  }
+  @media (max-width: 720px) {
+    .burger { display: inline-block; min-width: 36px; }
+    .sidebar { position: fixed; left: 0; top: 0; bottom: 0; z-index: 40; width: 84vw; max-width: 340px; transform: translateX(-100%); transition: transform .2s; box-shadow: var(--shadow); padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); }
+    .sidebar.open { transform: translateX(0); }
+    .notes { padding: 14px; padding-bottom: calc(14px + env(safe-area-inset-bottom)); grid-template-columns: 1fr; gap: 12px; }
+    header {
+      gap: 6px; padding: 10px 12px;
+      padding-top: calc(10px + env(safe-area-inset-top));
+      padding-left: calc(12px + env(safe-area-inset-left));
+      padding-right: calc(12px + env(safe-area-inset-right));
+    }
+    header h1 { font-size: 17px; gap: 6px; }
+    /* Кнопки шапки компактные, но тач-цель не меньше 36px. */
+    header button { padding: 8px 10px; font-size: 12px; min-height: 36px; }
+    .breadcrumbs { padding: 10px 14px; font-size: 13px; }
+    /* Модалки: на всю ширину / высоту, с учётом «шторки» браузера и выреза. */
+    .modal-mask {
+      padding: 8px; padding-bottom: calc(8px + env(safe-area-inset-bottom));
+      padding-left: calc(8px + env(safe-area-inset-left));
+      padding-right: calc(8px + env(safe-area-inset-right));
+      align-items: flex-end;
+    }
+    .modal { border-radius: 16px 16px 0 0; max-height: 92vh; max-height: 92dvh; max-width: 100%; }
+    .modal-head, .modal-body, .modal-foot { padding-left: 16px; padding-right: 16px; }
+    .field textarea { min-height: 140px; }
+    /* 16px в полях: иначе iOS Safari зумит страницу при фокусе. */
+    #search, .tm-search, .md-findbar input, .md-body textarea,
+    .field input, .field textarea, .field select { font-size: 16px; }
+    /* Тач-цели: палец, а не мышка. */
+    .facet { padding: 7px 12px; font-size: 13px; }
+    .facet .cnt, .tag-badge, .tag-hint, .search-suggest .sugg, .view-item,
+    .node-row, .root-note, .ctx-item { min-height: 38px; }
+    .note-card .tag, .note-view .tag { min-height: 28px; display: inline-flex; align-items: center; }
+    .breadcrumbs .crumb { padding: 6px 2px; }
+    .ctx-menu .ctx-item { padding: 9px 14px; }
+    #sortBtn, .facets-toggle, .facets-reset, .tree-toolbar button { min-height: 38px; }
+    .children { margin-left: 12px; }
+    .palette-item { min-height: 40px; padding: 10px 12px; }
+    .tm-act, .modal-foot button, .note-view .nv-head button,
+    .md-modes button, .md-findbar button { min-height: 38px; }
+    .modal-head .icon { min-width: 36px; min-height: 36px; }
+    .tm-color { width: 32px; height: 32px; }
+    .md-tb { min-height: 36px; min-width: 36px; padding: 6px 9px; }
+    /* Тулбар Markdown — одна прокручиваемая строка: экономит высоту на телефоне. */
+    .md-toolbar { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }
+    .md-toolbar .md-tb, .md-toolbar .md-sep { flex: 0 0 auto; }
+    /* Широкая таблица не сжимается в нечитаемые столбцы, а прокручивается. */
+    .md-table-wrap .md-table { width: max-content; min-width: 100%; }
+    /* Стрелки дерева крупнее на тач-экранах */
+    .node-row .chevron { font-size: 16px; width: 20px; }
+    /* контекстное меню от краёв экрана */
+    .ctx-menu { left: 8px !important; max-width: calc(100vw - 16px); }
+    /* счётчик/кнопки в сайдбаре */
+    .search-suggest { left: 8px; right: 8px; }
+  }
+  @media (max-width: 420px) {
+    /* Очень узкие телефоны: у «Файл/Экспорт/Импорт» остаются только иконки. */
+    header .btn-label { display: none; }
+  }
+  @media (max-width: 400px) {
+    /* Очень узкие телефоны: первая строка header только с заголовком и бургером */
+    header .spacer { display: none; }
+    header h1 { flex: 1; }
+    header button { padding: 6px 8px; }
+    /* «Удалить / Отмена / Сохранить» должны влезать в одну строку. */
+    .modal-foot { gap: 6px; }
+    .modal-foot button { padding-left: 10px; padding-right: 10px; }
+  }
+
+  /* Печать / экспорт в PDF (window.print) */
+  #printArea { display: none; }
+  @media print {
+    body > *:not(#printArea) { display: none !important; }
+    #printArea { display: block !important; padding: 12px; color: #000; background: #fff; }
+    #printArea .print-note { page-break-inside: avoid; margin-bottom: 22px; }
+    #printArea .print-note h2 { margin: 0 0 4px; font-size: 18px; }
+    #printArea .print-tags { font-size: 12px; color: #555; margin-bottom: 8px; }
+    #printArea .print-body { white-space: pre-wrap; line-height: 1.5; }
+    #printArea a { color: #000; text-decoration: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- Область печати (заполняется на время window.print) -->
+<div id="printArea"></div>
+
+<header>
+  <button class="burger" id="burgerBtn" title="Меню">☰</button>
+  <h1><span>🗂️</span> Дерево заметок</h1>
+  <div class="spacer"></div>
+  <button id="fileBtn" title="Привязать локальный файл для автосохранения">💾 <span class="btn-label">Файл</span></button>
+  <button id="backupBtn" title="Версии данных: снимки и восстановление">🕘</button>
+  <button id="diagBtn" title="Состояние хранилища и диагностика">ℹ️</button>
+  <button id="tagsBtn" title="Менеджер тэгов">🏷️</button>
+  <button id="exportBtn" title="Скачать JSON">⬇️ <span class="btn-label">Экспорт</span></button>
+  <button id="importBtn" title="Загрузить JSON">⬆️ <span class="btn-label">Импорт</span></button>
+  <button id="themeBtn" title="Переключить тему">🌙</button>
+  <button id="newNoteBtn" class="primary">+ Заметка</button>
+</header>
+
+<main>
+  <aside class="sidebar" id="sidebar">
+    <div class="search">
+      <input id="search" type="text" placeholder="Поиск: слова, #тэг, -тэг, title:…">
+      <div class="search-suggest" id="searchSuggest"></div>
+    </div>
+    <div class="sortbar">
+      <button type="button" id="sortBtn" title="Сортировка заметок">↕ Сначала обновлённые</button>
+    </div>
+    <div class="facets" id="facets">
+      <button type="button" class="facets-toggle" id="facetsToggle">🏷️ Фильтры по тэгам <span id="facetsCount"></span></button>
+      <div class="facets-hint">Число на плашке — сколько заметок с этим тэгом. Клик — включить/снять, Shift+клик — исключить. Поиск: слова работают по «И», <b>title:слово</b> — по заголовку, <b>-тэг</b> — исключить.</div>
+      <div class="facets-body" id="facetsBody"></div>
+      <button type="button" class="facets-reset" id="facetsReset" style="display:none">✕ Сбросить фильтры</button>
+      <div class="views">
+        <button type="button" class="facets-toggle" id="saveViewBtn" title="Сохранить текущий фильтр как представление">💾 Сохранить фильтр</button>
+        <div class="views-list" id="viewsList"></div>
+      </div>
+    </div>
+    <div class="tree-toolbar">
+      <button type="button" id="expandAllBtn" title="Развернуть всё дерево">⤵ Развернуть</button>
+      <button type="button" id="collapseAllBtn" title="Свернуть всё дерево">⤴ Свернуть</button>
+    </div>
+    <div class="tree" id="tree"></div>
+  </aside>
+
+  <section class="content">
+    <div class="breadcrumbs" id="breadcrumbs"></div>
+    <div class="content-split" id="contentSplit">
+      <div class="notes" id="notes"></div>
+      <article class="note-view" id="noteView" aria-label="Просмотр заметки"></article>
+    </div>
+  </section>
+</main>
+
+<div class="modal-mask" id="modalMask">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <div class="modal-head">
+      <h2 id="modalTitle">Новая заметка</h2>
+      <button class="icon" id="modalCloseBtn">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>Заголовок</label>
+        <input id="fTitle" type="text" placeholder="Заголовок заметки">
+      </div>
+      <div class="field">
+        <label>Содержимое</label>
+        <div class="md-modes">
+          <button type="button" class="md-mode active" id="mdEditBtn">✏️ Редактор</button>
+          <button type="button" class="md-mode" id="mdSplitBtn">⇄ Разделить</button>
+          <button type="button" class="md-mode" id="mdPreviewBtn">👁️ Предпросмотр</button>
+          <span class="spacer"></span>
+          <span class="muted-small" id="mdWordCount"></span>
+        </div>
+        <div class="md-box">
+          <div class="md-toolbar" id="mdToolbar">
+            <button type="button" class="md-tb" data-cmd="h1" title="Заголовок 1">H1</button>
+            <button type="button" class="md-tb" data-cmd="h2" title="Заголовок 2">H2</button>
+            <button type="button" class="md-tb" data-cmd="h3" title="Заголовок 3">H3</button>
+            <span class="md-sep"></span>
+            <button type="button" class="md-tb" data-cmd="bold" title="Жирный">B</button>
+            <button type="button" class="md-tb" data-cmd="italic" title="Курсив"><em>I</em></button>
+            <button type="button" class="md-tb" data-cmd="strike" title="Зачёркнутый"><s>S</s></button>
+            <button type="button" class="md-tb" data-cmd="code" title="Код">&lt;/&gt;</button>
+            <span class="md-sep"></span>
+            <button type="button" class="md-tb" data-cmd="ul" title="Маркированный список">• Список</button>
+            <button type="button" class="md-tb" data-cmd="ol" title="Нумерованный список">1. Список</button>
+            <button type="button" class="md-tb" data-cmd="list-todo" title="Задача (чекбокс)">☑ Задача</button>
+            <button type="button" class="md-tb" data-cmd="quote" title="Цитата">❝</button>
+            <button type="button" class="md-tb" data-cmd="link" title="Ссылка">🔗</button>
+            <span class="md-sep"></span>
+            <button type="button" class="md-tb" data-cmd="hr" title="Разделитель">—</button>
+            <button type="button" class="md-tb" data-cmd="table" title="Таблица">▦</button>
+            <button type="button" class="md-tb" data-cmd="clear" title="Очистить форматирование">⌫</button>
+            <span class="md-sep"></span>
+            <button type="button" class="md-tb" id="mdFindBtn" title="Поиск и замена (Ctrl+H)">⌕</button>
+          </div>
+          <div class="md-findbar" id="mdFindbar">
+            <input id="mdFind" placeholder="Найти…" autocomplete="off">
+            <input id="mdReplace" placeholder="Заменить на…" autocomplete="off">
+            <button type="button" id="mdFindNext">Найти далее</button>
+            <button type="button" id="mdReplaceOne">Заменить</button>
+            <button type="button" id="mdReplaceAll">Заменить все</button>
+            <button type="button" id="mdFindClose" title="Закрыть (Esc)">✕</button>
+          </div>
+          <div class="md-toc" id="mdToc"></div>
+          <div class="md-body">
+            <textarea id="fBody" placeholder="Текст заметки…"></textarea>
+            <div id="mdPreview"></div>
+          </div>
+        </div>
+        <div class="muted-small" style="margin-top:4px">
+          💡 Поддерживается Markdown: <b># Заголовки</b>, <b>**жирный**</b>, <b>*курсив*</b>, <b>~~зачёркнутый~~</b>, <b>`код`</b>, <b>- список</b>, <b>- [ссылка](http://…)</b>, <b>&gt; цитата</b>, <b>---</b>
+        </div>
+      </div>
+      <div class="field">
+        <label>Тэги — из их перестановок строится дерево папок слева</label>
+        <div class="tag-field">
+          <input id="fTags" type="text" placeholder="Введите тэг и нажмите Enter (напр. «работа»)" autocomplete="off">
+          <div class="tag-suggest" id="tagSuggest"></div>
+        </div>
+        <div class="tag-badges" id="tagBadges"></div>
+        <div class="tag-hints" id="tagHints"></div>
+        <div class="hint">💡 Заметка с тэгами <b>работа, проект</b> появится в папках <b>работа → проект</b> и <b>проект → работа</b>. Заметка без тэгов — в корне «Все без тэга».</div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="danger" id="btnDelete" style="display:none">Удалить</button>
+      <div class="spacer"></div>
+      <button id="btnCancel">Отмена</button>
+      <button id="btnSave" class="primary">Сохранить</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+<input type="file" id="fileInput" accept=".json" style="display:none">
+
+<!-- Менеджер тэгов: список всех тэгов с действиями -->
+<div class="modal-mask" id="tagManagerMask">
+  <div class="modal" role="dialog" aria-modal="true">
+    <div class="modal-head">
+      <h2>🏷️ Менеджер тэгов</h2>
+      <button class="icon" id="tmCloseBtn" title="Закрыть">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="tag-manager">
+        <input id="tmSearch" class="tm-search" type="text" placeholder="Поиск тэга…" autocomplete="off">
+        <div class="tm-toolbar">
+          <button type="button" id="tmCleanBtn" class="tm-act" title="Удалить тэги, не используемые ни в одной заметке">🧹 Убрать пустые тэги</button>
+          <button type="button" id="tmSimilarBtn" class="tm-act" title="Показать тэги с похожими именами">🔍 Похожие имена</button>
+        </div>
+        <div id="tmNotice" class="hint" style="display:none"></div>
+        <div class="tm-list" id="tmList"></div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <span class="muted-small" id="tmSummary"></span>
+      <div class="spacer"></div>
+      <button id="tmDoneBtn" class="primary">Готово</button>
+    </div>
+  </div>
+</div>
+
+<!-- Командная палитра (Ctrl+P) -->
+<div class="modal-mask" id="paletteMask">
+  <div class="modal narrow palette-modal" role="dialog" aria-modal="true">
+    <div class="modal-body" style="padding:12px">
+      <input id="paletteInput" class="tm-search" type="text" placeholder="Команда или заметка… (Ctrl+P)" autocomplete="off">
+      <div class="palette-list" id="paletteList"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Контекстное меню (правый клик) -->
+<div class="ctx-menu" id="ctxMenu"></div>
+
+<!-- Универсальный диалог (ввод/подтверждение) — замена prompt/confirm -->
+<div class="modal-mask" id="dialogMask">
+  <div class="modal narrow" role="dialog" aria-modal="true" aria-labelledby="dialogTitle">
+    <div class="modal-head">
+      <h2 id="dialogTitle">Подтверждение</h2>
+      <button class="icon" id="dialogCloseBtn">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="dialogMsg" class="dialog-msg"></div>
+      <div class="field" id="dialogInputWrap" style="display:none">
+        <label id="dialogLabel"></label>
+        <input id="dialogInput" type="text">
+      </div>
+    </div>
+    <div class="modal-foot">
+      <div class="spacer"></div>
+      <button id="dialogCancelBtn">Отмена</button>
+      <button id="dialogOkBtn" class="primary">ОК</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+const LS_KEY = 'noteTreeData_v1';
+const THEME_KEY = 'noteTreeTheme';
+const COLLAPSE_KEY = 'noteTreeCollapsed';
+const SORT_KEY = 'noteTreeSort';
+const SNAPSHOT_KEY = 'noteTreeSnapshots';
+const SNAPSHOT_MAX = 5;
+const TRASH_KEY = 'noteTreeTrash';
+const TRASH_MAX = 20;
+const VIEW_KEY = 'noteTreeLastView';
+const UNTITLED = 'Без названия';
+const NO_NOTES_MSG = '⚠️ Нет заметок для экспорта';
+const LOCALE = 'ru';
+const LOCALE_DT = 'ru-RU';
+const DND_MIME = 'text/note-id';
+const JSON_MIME = 'application/json;charset=utf-8';
+// Режимы сортировки заметок: id + подпись (единый источник для меню и кнопки).
+const SORT_MODES = [
+  { id: 'updated', label: 'Сначала обновлённые' },
+  { id: 'created', label: 'Сначала новые' },
+  { id: 'title', label: 'По алфавиту' }
+];
+
+let state = { notes: [], tags: [], theme: 'light' };
+let currentPath = [];       // текущая ветка дерева (массив ИМЁН тэгов)
+let editingId = null;       // id заметки в редакторе (null = новая)
+let selectedId = null;      // id последней открытой заметки (для подсветки в дереве)
+let viewingId = null;       // id заметки, показанной целиком в правой части (null — списком)
+let currentTags = [];       // тэги в редакторе
+let editorSnapshot = '';    // снимок состояния редактора (для отслеживания изменений)
+let searchQuery = '';
+let collapsed = new Set();  // свёрнутые ключи веток "t1/t2"
+let sortMode = 'updated';   // режим сортировки заметок: updated|created|title
+
+// ---------- Persistence ----------
+// Два слоя хранения:
+//   • настройки (тема, сортировка, свёрнутые папки, последнее место, фильтры,
+//     имя файла) — localStorage: они крошечные и нужны синхронно;
+//   • тяжёлые данные (заметки, резервная копия, версионные снимки, корзина) —
+//     IndexedDB: localStorage ограничен ~5 МБ, а снимки и история легко
+//     перекрывают этот лимит.
+// Снаружи всё как раньше: storageGet/storageSet синхронные. Для IndexedDB
+// работает кэш memStore, который один раз наполняется в storageInit() до
+// loadState(). Запись идёт в память сразу, а в базу — фоном.
+const IDB_NAME = 'noteTreeDB';
+const IDB_STORE = 'kv';
+const IDB_VERSION = 1;
+// Ключи, которые живут в IndexedDB (всё остальное — в localStorage).
+const HEAVY_KEYS = [LS_KEY, LS_KEY + '_backup', SNAPSHOT_KEY, TRASH_KEY];
+const heavyKeySet = new Set(HEAVY_KEYS);
+
+let storageAvailable = true;   // доступен ли localStorage (для настроек)
+let idbMode = false;           // тяжёлые данные хранятся в IndexedDB
+let idbError = '';             // последняя ошибка IndexedDB (для диагностики)
+let idbDB = null;              // открытое соединение
+let storageWarned = false;     // предупреждение о сбое записи — один раз
+const memStore = Object.create(null); // синхронный кэш тяжёлых ключей
+const idbDirty = new Set();    // ключи, ожидающие записи
+const idbWriting = new Set();  // ключи, которые пишутся прямо сейчас
+
+function storageGet(key) {
+  // Тяжёлые ключи в режиме IndexedDB читаются из памяти: синхронно и без базы.
+  if (idbMode && heavyKeySet.has(key)) return (key in memStore) ? memStore[key] : null;
+  try {
+    if (typeof localStorage === 'undefined') throw new Error('no ls');
+    return localStorage.getItem(key);
+  } catch (e) { storageAvailable = false; return (key in memStore) ? memStore[key] : null; }
+}
+function storageSet(key, value) {
+  if (heavyKeySet.has(key) && idbMode) {
+    // Сначала память (её сразу видят все читатели), потом фоновая запись в базу.
+    memStore[key] = value;
+    queueIdbWrite(key);
+    return;
+  }
+  try {
+    if (typeof localStorage === 'undefined') throw new Error('no ls');
+    localStorage.setItem(key, value);
+  } catch (e) { storageAvailable = false; memStore[key] = value; }
+}
+
+// ---------- IndexedDB: тяжёлые данные ----------
+// Предупреждаем один раз за сессию: дальше спамить тостом на каждую запись нельзя.
+function notifyStorageFailure(err) {
+  idbError = err && err.message ? err.message : String(err || 'unknown');
+  if (storageWarned) return;
+  storageWarned = true;
+  notify('⚠️ Не удалось записать в базу браузера — данные остались в памяти. Сделайте экспорт (JSON).');
+}
+function openIdb() {
+  if (idbDB) return Promise.resolve(idbDB);
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined' || !indexedDB) { reject(new Error('IndexedDB недоступна')); return; }
+    let req;
+    try { req = indexedDB.open(IDB_NAME, IDB_VERSION); }
+    catch (e) { reject(e); return; }
+    req.onupgradeneeded = () => {
+      try {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+      } catch (e) { /* ниже сработает onerror */ }
+    };
+    req.onsuccess = () => { idbDB = req.result; resolve(idbDB); };
+    req.onerror = () => reject(req.error || new Error('не удалось открыть базу'));
+    req.onblocked = () => reject(new Error('база занята другой вкладкой'));
+  });
+}
+function idbGetAll(keys) {
+  return openIdb().then(db => new Promise((resolve, reject) => {
+    const out = Object.create(null);
+    const tx = db.transaction(IDB_STORE, 'readonly');
+    const store = tx.objectStore(IDB_STORE);
+    keys.forEach(key => {
+      const rq = store.get(key);
+      rq.onsuccess = () => { if (rq.result !== undefined) out[key] = rq.result; };
+    });
+    tx.oncomplete = () => resolve(out);
+    tx.onerror = () => reject(tx.error || new Error('не удалось прочитать базу'));
+    tx.onabort = () => reject(tx.error || new Error('чтение прервано'));
+  }));
+}
+function idbPut(key, value) {
+  return openIdb().then(db => new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    const store = tx.objectStore(IDB_STORE);
+    if (value === null || value === undefined) store.delete(key);
+    else store.put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error('не удалось записать в базу'));
+    tx.onabort = () => reject(tx.error || new Error('запись прервана'));
+  }));
+}
+// Поставить ключ в очередь. По одному ключу одновременно идёт не больше одной
+// транзакции, а промежуточные значения схлопываются в последнее.
+function queueIdbWrite(key) {
+  if (!idbMode) return;
+  idbDirty.add(key);
+  flushIdbKey(key);
+}
+function flushIdbKey(key) {
+  if (!idbMode || idbWriting.has(key) || !idbDirty.has(key)) return;
+  idbDirty.delete(key);
+  idbWriting.add(key);
+  const value = (key in memStore) ? memStore[key] : null;
+  idbPut(key, value).then(() => {
+    idbWriting.delete(key);
+    if (idbDirty.has(key)) flushIdbKey(key);
+  }, err => {
+    idbWriting.delete(key);
+    notifyStorageFailure(err);
+  });
+}
+// Дописать всё, что не успело уйти в базу (перед скрытием/закрытием вкладки).
+function flushIdbWrites() {
+  if (!idbMode) return;
+  [...idbDirty].forEach(flushIdbKey);
+}
+// Дождаться, пока очередь записи опустеет (тесты и аккуратное закрытие).
+function idbIdle() {
+  return new Promise(resolve => {
+    const check = () => { if (idbWriting.size === 0 && idbDirty.size === 0) resolve(); else setTimeout(check, 5); };
+    check();
+  });
+}
+// Один раз при старте: открыть базу, поднять тяжёлые ключи в память и
+// перенести данные из localStorage (миграция со старой версии).
+async function storageInit() {
+  if (typeof indexedDB === 'undefined' || !indexedDB) return false;
+  try {
+    const values = await idbGetAll(HEAVY_KEYS);
+    idbMode = true;
+    Object.keys(values).forEach(k => { memStore[k] = values[k]; });
+    await migrateLsToIdb(values);
+    return true;
+  } catch (e) {
+    if (idbDB) { try { idbDB.close(); } catch (e2) {} }
+    idbMode = false;
+    idbDB = null;
+    idbError = e && e.message ? e.message : String(e);
+    return false;
+  }
+}
+// Перенести тяжёлые ключи из localStorage в IndexedDB. Копия в localStorage
+// удаляется только после подтверждённой записи в базу.
+async function migrateLsToIdb(values) {
+  for (const key of HEAVY_KEYS) {
+    let raw = null;
+    try { raw = localStorage.getItem(key); } catch (e) { raw = null; }
+    // В базе уже есть значение — старая копия в localStorage больше не нужна.
+    if (key in values) {
+      if (raw !== null) { try { localStorage.removeItem(key); } catch (e) {} }
+      continue;
+    }
+    if (raw === null || raw === '') continue;
+    // Данные сразу доступны в сессии, даже если запись в базу сорвётся:
+    // иначе при idbMode=true storageGet не увидел бы их ни в памяти, ни в LS.
+    memStore[key] = raw;
+    try {
+      await idbPut(key, raw);
+      try { localStorage.removeItem(key); } catch (e) {}
+    } catch (e) { notifyStorageFailure(e); }
+  }
+}
+// Только для тестов: сбросить кэш и вернуться в режим localStorage.
+function storageClearMemory() {
+  Object.keys(memStore).forEach(k => { delete memStore[k]; });
+  idbDirty.clear();
+  idbWriting.clear();
+  if (idbDB) { try { idbDB.close(); } catch (e) {} }
+  idbDB = null;
+  idbMode = false;
+  idbError = '';
+  storageWarned = false;
+}
+
+// ---------- Таблица тэгов ----------
+// state.tags — массив { id, name }. Заметки хранят tagIds (ссылки на id).
+// tagById — быстрый маппинг id -> name (строится из state.tags).
+let tagById = {};
+// Быстрый доступ к цветам тэгов по имени (для дерева: сотни строк за рендер).
+let tagColorMap = new Map();
+function rebuildTagIndex() {
+  tagById = {};
+  tagColorMap = new Map();
+  state.tags.forEach(t => {
+    if (!t || !t.id) return;
+    tagById[t.id] = t.name || '';
+    if (t.color) tagColorMap.set(t.name, t.color);
+  });
+}
+function tagUid() { return 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5); }
+// Вернуть id тэга по имени, создав новую запись в таблице при необходимости.
+function ensureTag(name) {
+  const clean = String(name || '').trim();
+  if (!clean) return null;
+  // ищем существующий тэг с таким именем (без учёта регистра)
+  for (let i = 0; i < state.tags.length; i++) {
+    if (state.tags[i].name.toLowerCase() === clean.toLowerCase()) return state.tags[i].id;
+  }
+  const id = tagUid();
+  state.tags.push({ id, name: clean });
+  tagById[id] = clean;
+  return id;
+}
+// Имя тэга по id (или '' если отсутствует).
+function tagName(id) { return tagById[id] != null ? tagById[id] : ''; }
+// Запись тэга по имени (или null).
+function getTagByName(name) { return state.tags.find(x => x.name === name) || null; }
+// Регистронезависимое сравнение имён тэгов.
+function sameName(a, b) { return String(a).toLowerCase() === String(b).toLowerCase(); }
+// Заметка по id (или null).
+function noteById(id) { return state.notes.find(x => x.id === id) || null; }
+// Цвет тэга по имени (или '' если не задан).
+function tagColor(name) {
+  return tagColorMap.get(name) || '';
+}
+// Очистить битые ссылки tagIds (тэги, которых нет в таблице).
+function pruneTagIds(ids) {
+  if (!Array.isArray(ids)) return [];
+  return ids.filter(id => tagById[id] != null); // сохраняем порядок, убираем неизвестные
+}
+
+// Привести заметку к единой структуре. Поле tagIds — массив id тэгов.
+// Поддерживается старый формат (tags — строковые имена): конвертируется в id.
+function normalizeNote(n) {
+  let tagIds = [];
+  if (n && Array.isArray(n.tagIds)) {
+    tagIds = n.tagIds.map(String);
+  } else if (n && Array.isArray(n.tags)) {
+    tagIds = n.tags.map(t => ensureTag(String(t))).filter(Boolean);
+  }
+  tagIds = pruneTagIds(tagIds);
+  const rec = {
+    title: (n && n.title) || '',
+    body: (n && n.body) || '',
+    tagIds: tagIds,
+    created: (n && n.created) || Date.now(),
+    updated: (n && n.updated) || Date.now(),
+    id: (n && n.id) || uid(),
+    history: (n && Array.isArray(n.history)) ? n.history.slice(0, 20) : []
+  };
+  if (n && n.pinned) rec.pinned = true;
+  return rec;
+}
+// Заметка считается пустой, если нет ни заголовка, ни текста, ни тэгов (по id).
+function isEmptyNote(n) { return n.title === '' && n.body === '' && n.tagIds.length === 0; }
+
+// Проверка валидности импортируемых данных (массив заметок или объект с массивом notes).
+// Важно: объект с notes, но notes НЕ массив, считается невалидным — иначе импорт
+// такого файла затёр бы все текущие данные пустым набором.
+function isValidData(data) {
+  if (Array.isArray(data)) return true;
+  return !!(data && typeof data === 'object' && Array.isArray(data.notes));
+}
+
+// Применить загруженный объект данных (version 2: { tags, notes } | version 1: [{...}]).
+// Нормализует таблицу тэгов и заметки; возвращает массив заметок.
+function applyData(data) {
+  // если передан простой массив заметок старого формата
+  let tagsData = [];
+  let notesData = [];
+  if (Array.isArray(data)) {
+    notesData = data;
+  } else if (data && typeof data === 'object') {
+    tagsData = Array.isArray(data.tags) ? data.tags : [];
+    notesData = Array.isArray(data.notes) ? data.notes : [];
+  }
+  // Инициализировать таблицу тэгов из данных (id, name, опциональный color).
+  // Дедупликация: по id и по имени без учёта регистра (иначе импорт с дублями
+  // делает таблицу неоднозначной). Для отброшенных id запоминаем канонический,
+  // чтобы перенаправить ссылки tagIds заметок.
+  const byName = {};   // lower(name) -> canonical id
+  const byId = {};     // any id -> canonical id
+  const tags = [];
+  tagsData.forEach(t => {
+    if (!t || !t.id || typeof t.name !== 'string') return;
+    const id = String(t.id);
+    const name = t.name.trim();
+    if (!name) return;
+    const ln = name.toLowerCase();
+    let canonical = byName[ln];
+    if (canonical) {
+      byId[id] = canonical;
+      // переносим цвет, если у канонического его нет, а у дубля есть
+      const rec = tags.find(x => x.id === canonical);
+      if (rec && !rec.color && typeof t.color === 'string' && t.color) rec.color = t.color;
+      return;
+    }
+    if (byId[id]) return; // дубликат id — первый важнее
+    const rec = { id, name };
+    if (typeof t.color === 'string' && t.color) rec.color = t.color;
+    tags.push(rec);
+    byName[ln] = id;
+    byId[id] = id;
+  });
+  state.tags = tags;
+  rebuildTagIndex();
+  // нормализуем заметки (создавая недостающие тэги из старых имён),
+  // предварительно перенаправляя tagIds на канонические id
+  const remapIds = ids => ids.map(x => { const s = String(x); return byId[s] != null ? byId[s] : s; });
+  const notes = notesData.map(n => {
+    if (n && typeof n === 'object' && Array.isArray(n.tagIds)) {
+      return normalizeNote({ ...n, tagIds: remapIds(n.tagIds) });
+    }
+    return normalizeNote(n);
+  });
+  rebuildTagIndex(); // на случай, если normalizeNote добавила новые тэги
+  invalidateTree();
+  return notes.filter(n => !isEmptyNote(n));
+}
+
+function loadState() {
+  const raw = storageGet(LS_KEY);
+  const hasData = raw !== null && raw !== '';
+  if (hasData) {
+    try { const data = JSON.parse(raw); state.notes = applyData(data); }
+    catch (e) { state.notes = applyData([]); state.tags = []; rebuildTagIndex(); }
+  } else {
+    state.notes = applyData([]);
+  }
+  state.notes = state.notes.filter(n => !isEmptyNote(n));
+  // Снимок состояния при загрузке страницы -> в резервный ключ localStorage.
+  // Позволяет восстановить данные, если их перезапишет импорт/сбой (без консоли).
+  if (state.notes.length > 0) {
+    try { storageSet(LS_KEY + '_backup', JSON.stringify({ version: 2, tags: state.tags, notes: state.notes })); } catch (e) {}
+    maybeSnapshot(); // версионный снимок при изменении состава
+  }
+  state.theme = storageGet(THEME_KEY) || 'light';
+  const savedSort = storageGet(SORT_KEY);
+  if (savedSort === 'created' || savedSort === 'title' || savedSort === 'updated') sortMode = savedSort;
+  renderSortLabel();
+  try { collapsed = new Set(JSON.parse(storageGet(COLLAPSE_KEY) || '[]')); } catch (e) { collapsed = new Set(); }
+  applyTheme();
+  if (!storageAvailable && !idbMode) {
+    const isFile = (typeof location !== 'undefined') && location.protocol === 'file:';
+    notify('⚠️ Хранилище заблокировано — изменения не сохранятся после обновления.' + (isFile ? ' Откройте через локальный сервер (http://localhost).' : ' Нажмите ℹ️ для диагностики.'));
+  } else if (!storageAvailable && idbMode) {
+    notify('⚠️ Заметки сохраняются в базе браузера, но настройки (тема, свёрнутые папки) — нет: localStorage заблокирован.');
+  }
+}
+// Сохранить и заметки, и таблицу тэгов (версия 2).
+function saveState() {
+  storageSet(LS_KEY, JSON.stringify({ version: 2, tags: state.tags, notes: state.notes }));
+  maybeSnapshot(); // снимок при изменении состава заметок (остальные вызовы — no-op)
+}
+function saveTheme() { storageSet(THEME_KEY, state.theme); }
+function saveCollapsed() { storageSet(COLLAPSE_KEY, JSON.stringify([...collapsed])); }
+
+// ---------- Версионные снимки архива (ротация в localStorage) ----------
+// Список снимков: [{ ts, count, data: {tags, notes} }], не старше SNAPSHOT_MAX.
+function loadSnapshots() {
+  try {
+    const raw = storageGet(SNAPSHOT_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr : [];
+  } catch (e) { return []; }
+}
+function saveSnapshots(list) {
+  storageSet(SNAPSHOT_KEY, JSON.stringify(list.slice(0, SNAPSHOT_MAX)));
+}
+// Сделать снимок текущего состояния, если состав заметок изменился с прошлого снимка.
+function maybeSnapshot(force) {
+  if (state.notes.length === 0) return false;
+  const list = loadSnapshots();
+  const signature = state.notes.length + ':' + state.notes.map(n => n.id).sort().join(',');
+  const lastSig = list.length ? list[0].sig : null;
+  if (!force && signature === lastSig) return false;
+  const snapshot = {
+    ts: Date.now(),
+    sig: signature,
+    count: state.notes.length,
+    data: {
+      tags: state.tags.map(t => ({ ...t })),
+      notes: state.notes.map(n => ({ ...n, tagIds: (n.tagIds || []).slice(), history: (n.history || []).map(h => ({ ...h })) }))
+    }
+  };
+  list.unshift(snapshot);
+  saveSnapshots(list);
+  return true;
+}
+// Восстановить состояние из снимка по индексу.
+function restoreSnapshot(index) {
+  const list = loadSnapshots();
+  const snap = list[index];
+  if (!snap || !snap.data) { notify('⚠️ Снимок не найден'); return false; }
+  state.notes = applyData(snap.data);
+  resetNavigation();
+  saveState();
+  saveToFile();
+  renderAll();
+  notify('🕘 Восстановлено из снимка (' + snap.count + ' заметок)');
+  return true;
+}
+
+// ---------- Корзина удалённых заметок ----------
+function loadTrash() {
+  try { const a = JSON.parse(storageGet(TRASH_KEY) || '[]'); return Array.isArray(a) ? a : []; }
+  catch (e) { return []; }
+}
+function saveTrash(list) { storageSet(TRASH_KEY, JSON.stringify(list.slice(0, TRASH_MAX))); }
+// Убрать заметку в корзину (перед удалением из state.notes).
+function moveToTrash(n) {
+  const t = loadTrash();
+  t.unshift({ deleted: Date.now(), note: JSON.parse(JSON.stringify(n)) });
+  saveTrash(t);
+}
+// Восстановить заметку из корзины по индексу.
+function restoreFromTrash(index) {
+  const t = loadTrash();
+  const item = t[index];
+  if (!item) { notify('⚠️ Запись не найдена'); return false; }
+  const restored = normalizeNote(item.note);
+  // если заметка с таким id уже есть — дать новый id
+  if (noteById(restored.id)) restored.id = uid();
+  state.notes.push(restored);
+  t.splice(index, 1);
+  saveTrash(t);
+  invalidateTree();
+  saveState();
+  saveToFile();
+  renderAll();
+  notify('↩ Заметка восстановлена: ' + (restored.title || UNTITLED));
+  return true;
+}
+// Очистить корзину полностью.
+async function emptyTrash() {
+  const t = loadTrash();
+  if (t.length === 0) { notify('🗑 Корзина пуста'); return; }
+  const ok = await dialogConfirm('Очистить корзину (' + t.length + ' заметок)? Восстановить будет нельзя.');
+  if (!ok) return;
+  saveTrash([]);
+  notify('🗑 Корзина очищена');
+}
+// Подменю корзины (вызывается из меню «🕘 Версии данных» и палитры).
+function trashMenu() {
+  const t = loadTrash();
+  const items = [];
+  if (t.length === 0) items.push({ label: 'Корзина пуста', run: () => {} });
+  t.slice(0, TRASH_MAX).forEach((item, i) => {
+    const d = new Date(item.deleted).toLocaleString(LOCALE_DT, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+    items.push({ label: '📄 ' + (item.note.title || UNTITLED).slice(0, 28) + ' (' + d + ')', run: () => restoreFromTrash(i) });
+  });
+  if (t.length > 0) {
+    items.push('-');
+    items.push({ label: '🧹 Очистить корзину', run: emptyTrash, danger: true });
+  }
+  submenuFor(items);
+}
+
+// ---------- Отмена опасных действий (Ctrl+Z, одноуровневая) ----------
+let undoState = null;
+// Запомнить состояние ПЕРЕД опасным действием (вызывать первым).
+function prepareUndo(label) {
+  undoState = {
+    label,
+    tags: state.tags.map(t => ({ ...t })),
+    notes: state.notes.map(n => ({ ...n, tagIds: (n.tagIds || []).slice(), history: (n.history || []).map(h => ({ ...h })) }))
+  };
+}
+// Отменить последнее опасное действие (вернуть состояние из undoState).
+function undoLastAction() {
+  if (!undoState) { notify('🕘 Нечего отменять'); return false; }
+  const u = undoState;
+  undoState = null;
+  state.notes = applyData({ tags: u.tags, notes: u.notes });
+  resetNavigation();
+  saveState();
+  saveToFile();
+  renderAll();
+  notify('↩ Отменено: ' + u.label);
+  return true;
+}
+
+
+function uid() { return 'n' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
+
+// ---------- Notifications ----------
+// Название «notify» вместо «toast» выбрано намеренно: в браузере у
+// элемента <div id="toast"> создаётся глобальная ID-ссылка window.toast,
+// которая затеняла бы одноимённую функцию.
+let notifyTimer = null;
+function notify(message) {
+  const el = document.getElementById('toast');
+  if (!el) return;
+  el.textContent = message;
+  el.classList.add('show');
+  if (notifyTimer) clearTimeout(notifyTimer);
+  notifyTimer = setTimeout(() => el.classList.remove('show'), 2600);
+}
+
+// ---------- Tags / permutations ----------
+function permute(arr) {
+  const res = [];
+  const used = new Array(arr.length).fill(false);
+  (function back(path) {
+    if (path.length === arr.length) { res.push(path.slice()); return; }
+    for (let i = 0; i < arr.length; i++) {
+      if (used[i]) continue;
+      used[i] = true; path.push(arr[i]);
+      back(path);
+      path.pop(); used[i] = false;
+    }
+  })([]);
+  return res;
+}
+// Имена тэгов заметки (по tagIds через таблицу), дедуплицированные, без пустых.
+// Порядок сохраняется; битые/несуществующие id пропускаются.
+function tagsOf(n) {
+  const set = new Set();
+  (n.tagIds || []).forEach(id => {
+    const name = tagName(id);
+    if (name) set.add(name);
+  });
+  return [...set];
+}
+// Максимальное число тэгов, которые участвуют в построении дерева и навигации.
+// Все перестановки из k тэгов = k!; чтобы избежать комбинаторного взрыва,
+// сверх предела учитываются только первые MAX_PERM_TAGS тэгов заметки.
+const MAX_PERM_TAGS = 5;
+// Тэги, участвующие в путях дерева (первые MAX_PERM_TAGS).
+function pathTagsOf(n) { return tagsOf(n).slice(0, MAX_PERM_TAGS); }
+function notePaths(n) {
+  const t = pathTagsOf(n);
+  if (t.length === 0) return [[]];
+  return permute(t);
+}
+// Полный список тэгов (для подсказок в редакторе), из таблицы.
+function allTags() {
+  return state.tags
+    .map(t => t.name)
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b, LOCALE));
+}
+// Заметка принадлежит папке path, если все тэги пути есть в её наборе тэгов,
+// участвующих в дереве. (Уникальность тэгов гарантирует существование
+// перестановки, начинающейся с любых двух различных тэгов — без генерации k!).
+function noteBelongsToPath(note, path) {
+  const t = pathTagsOf(note);
+  if (path.length === 0) return t.length === 0;
+  if (path.length > t.length) return false;
+  const set = new Set(t);
+  for (let i = 0; i < path.length; i++) if (!set.has(path[i])) return false;
+  return true;
+}
+
+// ---------- Tree model ----------
+// Кэш дерева: пересчитываем только при изменении данных, а не на каждый рендер.
+// Результат buildTree только читается (renderTree/renderNode не мутируют структуру),
+// поэтому кэш безопасен.
+let treeCache = null;
+// DOM-реестр дерева: ключ пути -> запись узла. Позволяет менять активную ветку,
+// сворачивать/разворачивать и обновлять цвета, не пересобирая всё дерево.
+let treeRows = new Map();
+let treeDirty = true;
+// Кэш имён тэгов заметки в нижнем регистре (поиск, фасеты): меньше аллокаций.
+let tagsLowerCache = new Map();
+// Инвалидация при изменении данных: сбрасываем дерево, счётчики и кэш имён.
+function invalidateTree() {
+  treeCache = null;
+  tagCountsCache = null;
+  tagsLowerCache = new Map();
+  treeDirty = true;
+}
+// Имена тэгов заметки в нижнем регистре. Кэш сбрасывается в invalidateTree().
+function tagsLowerOf(n) {
+  let v = tagsLowerCache.get(n.id);
+  if (!v) { v = tagsOf(n).map(t => t.toLowerCase()); tagsLowerCache.set(n.id, v); }
+  return v;
+}
+function buildTree() {
+  if (treeCache) return treeCache;
+  const root = { name: null, ids: new Set(), children: new Map() };
+  state.notes.forEach(note => {
+    const t = pathTagsOf(note);
+    if (t.length === 0) { root.ids.add(note.id); return; }
+    notePaths(note).forEach(p => {
+      let node = root;
+      p.forEach(tag => {
+        if (!node.children.has(tag)) node.children.set(tag, { name: tag, ids: new Set(), children: new Map() });
+        node = node.children.get(tag);
+        node.ids.add(note.id);
+      });
+    });
+  });
+  treeCache = root;
+  return root;
+}
+
+// ---------- Rendering ----------
+// Перерисовать дерево. Если данные не менялись (treeDirty === false), DOM не
+// пересобирается: обновляются только активная строка, шевроны и видимость детей.
+// Это убирает полную пересборку дерева при каждом переходе по папкам.
+function renderTree() {
+  const el = document.getElementById('tree');
+  if (!treeDirty && el.dataset.built === '1') { applyTreeState(); return; }
+  el.innerHTML = '';
+  treeRows.clear();
+  const root = buildTree();
+  // корневые заметки (без тэгов)
+  state.notes.filter(n => root.ids.has(n.id)).forEach(n => {
+    const d = document.createElement('div');
+    d.className = 'root-note';
+    d.tabIndex = 0;
+    d.dataset.noteId = n.id;
+    d.innerHTML = '<span>📄</span><span class="nm"></span>';
+    d.querySelector('.nm').textContent = n.title || UNTITLED;
+    el.appendChild(d);
+  });
+  [...root.children.entries()].sort((a, b) => a[0].localeCompare(b[0], LOCALE))
+    .forEach(([name, child]) => el.appendChild(renderNode(name, child, null)));
+  treeDirty = false;
+  el.dataset.built = '1';
+  applyTreeState();
+}
+
+function renderNode(name, node, parentPath) {
+  const path = parentPath ? parentPath.concat(name) : [name];
+  const key = path.join('/');
+  const wrapper = document.createElement('div');
+  wrapper.className = 'node';
+  const row = document.createElement('div');
+  row.className = 'node-row';
+  row.tabIndex = 0;
+  row.dataset.path = key;
+  row.innerHTML = '<span class="chevron"></span><span class="folder-ico">📁</span><span class="nm"></span><span class="count"></span>';
+  row.querySelector('.nm').textContent = name;
+  row.querySelector('.count').textContent = node.ids.size;
+  wrapper.appendChild(row);
+  const rec = {
+    row, wrapper, node, name, path, key,
+    chev: row.querySelector('.chevron'),
+    icon: row.querySelector('.folder-ico'),
+    hasChildren: node.children.size > 0,
+    childrenDiv: null,
+    color: null
+  };
+  treeRows.set(key, rec);
+  updateRowState(rec);
+  // Ленивая отрисовка: у свёрнутых папок DOM детей не создаётся (экономит
+  // память и время при большом дереве). Дети появятся при разворачивании.
+  if (!collapsed.has(key)) buildChildren(rec);
+  return wrapper;
+}
+
+// Построить детей папки один раз. Готовое поддерево кэшируется в записи узла,
+// поэтому повторные сворачивания/разворачивания не создают DOM заново.
+function buildChildren(rec) {
+  if (rec.childrenDiv || !rec.hasChildren) return rec.childrenDiv;
+  const div = document.createElement('div');
+  div.className = 'children';
+  [...rec.node.children.entries()].sort((a, b) => a[0].localeCompare(b[0], LOCALE))
+    .forEach(([cname, cnode]) => div.appendChild(renderNode(cname, cnode, rec.path)));
+  rec.childrenDiv = div;
+  rec.wrapper.appendChild(div);
+  return div;
+}
+
+// Обновить одну строку: активность, шеврон, цвет иконки, видимость детей.
+function updateRowState(rec) {
+  rec.row.classList.toggle('active', isPathActive(rec.path));
+  const chevText = rec.hasChildren ? (collapsed.has(rec.key) ? '▸' : '▾') : '';
+  if (rec.chev.textContent !== chevText) rec.chev.textContent = chevText;
+  if (rec.childrenDiv) {
+    // Свёрнутые дети физически убираются из DOM (а не скрываются), чтобы
+    // клавиатурная навигация не видела невидимых строк.
+    if (collapsed.has(rec.key)) {
+      if (rec.childrenDiv.parentNode) rec.childrenDiv.remove();
+    } else if (!rec.childrenDiv.parentNode) {
+      rec.wrapper.appendChild(rec.childrenDiv);
+    }
+  }
+  const color = tagColor(rec.name) || '';
+  if (color !== rec.color) {
+    rec.color = color;
+    rec.icon.style.color = color;
+  }
+}
+
+// Синхронизировать состояние дерева с моделью, не пересобирая DOM.
+function applyTreeState() {
+  treeRows.forEach(updateRowState);
+  document.querySelectorAll('#tree .root-note').forEach(el => {
+    el.classList.toggle('active', el.dataset.noteId === selectedId);
+  });
+}
+
+// Клик по папке: свёрнутая разворачивается (вложенные — сворачиваются),
+// развёрнутая сворачивается. Пересборки всего дерева нет.
+function toggleFolder(rec) {
+  if (rec.hasChildren) {
+    if (collapsed.has(rec.key)) {
+      collapsed.delete(rec.key);
+      // При разворачивании вложенные папки сворачиваем, чтобы дерево не
+      // раскрывалось целиком; их можно раскрыть отдельным кликом.
+      rec.node.children.forEach((_, cname) => collapsed.add(rec.path.concat(cname).join('/')));
+      buildChildren(rec);
+    } else {
+      collapsed.add(rec.key);
+    }
+    saveCollapsed();
+  }
+  goToPath(rec.path);
+  toggleSidebarIfMobile();
+}
+
+// Делегированные обработчики дерева: вместо обработчиков на каждой строке.
+function treeHandleClick(e) {
+  const row = e.target.closest('#tree .node-row');
+  if (row) {
+    const rec = treeRows.get(row.dataset.path);
+    if (rec) toggleFolder(rec);
+    return;
+  }
+  const rn = e.target.closest('#tree .root-note');
+  if (rn) { viewingId = null; currentPath = []; renderAll(); selectNote(rn.dataset.noteId); }
+}
+function treeHandleContextMenu(e) {
+  const row = e.target.closest('#tree .node-row');
+  if (row) {
+    const rec = treeRows.get(row.dataset.path);
+    if (rec) { e.preventDefault(); folderContextMenu(e.clientX, e.clientY, rec.path); }
+    return;
+  }
+  const rn = e.target.closest('#tree .root-note');
+  if (rn) { e.preventDefault(); noteContextMenu(e.clientX, e.clientY, rn.dataset.noteId); }
+}
+// Drop-цель: заметку можно перетащить из области заметок в папку.
+function treeHandleDragOver(e) {
+  const row = e.target.closest('#tree .node-row');
+  if (!row) return;
+  e.preventDefault();
+  row.classList.add('drop-target');
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move';
+}
+function treeHandleDragLeave(e) {
+  const row = e.target.closest('#tree .node-row');
+  if (row) row.classList.remove('drop-target');
+}
+function treeHandleDrop(e) {
+  const row = e.target.closest('#tree .node-row');
+  if (!row) return;
+  e.preventDefault();
+  row.classList.remove('drop-target');
+  const rec = treeRows.get(row.dataset.path);
+  const noteId = e.dataTransfer ? e.dataTransfer.getData(DND_MIME) : '';
+  if (noteId && rec) moveNoteToTag(noteId, rec.name);
+}
+
+// ---------- Командная палитра (Ctrl+P) ----------
+// Список команд + переход к заметкам/тэгам.
+function paletteCommands() {
+  return [
+    { label: '➕ Новая заметка', hint: 'Ctrl+N', run: () => openEditor() },
+    { label: '🏷️ Менеджер тэгов', hint: '', run: () => openTagManager() },
+    { label: '⬇️ Экспорт JSON', hint: '', run: () => exportData() },
+    { label: '⬆️ Импорт JSON', hint: '', run: () => importData() },
+    { label: '⬇️ Экспорт Markdown', hint: '', run: () => exportMd(state.notes) },
+    { label: '⬇️ Экспорт TXT', hint: '', run: () => exportTxt(state.notes) },
+    { label: '🎯 Экспорт найденного (MD)', hint: '', run: () => exportFound() },
+    { label: '🖨️ Печать/PDF всех заметок', hint: '', run: () => printNotes(state.notes) },
+    { label: '🌓 Сменить тему', hint: '', run: () => toggleTheme() },
+    { label: '🕘 Версии данных', hint: '', run: () => snapshotMenu() },
+    { label: '🗑 Корзина заметок', hint: '', run: () => trashMenu() },
+    { label: '↩ Отменить последнее действие', hint: 'Ctrl+Z', run: () => undoLastAction() },
+    { label: 'ℹ️ Диагностика хранилища', hint: '', run: () => showDiagnostics() },
+    { label: '⤵ Развернуть дерево', hint: '', run: () => expandAllTree() },
+    { label: '⤴ Свернуть дерево', hint: '', run: () => collapseAllTree() },
+    { label: '🏠 Все без тэга', hint: '', run: () => { currentPath = []; renderAll(); } }
+  ];
+}
+function openPalette() {
+  const mask = document.getElementById('paletteMask');
+  mask.classList.add('show');
+  const inp = document.getElementById('paletteInput');
+  inp.value = '';
+  renderPalette();
+  setTimeout(() => inp.focus(), 30);
+}
+function closePalette() {
+  document.getElementById('paletteMask').classList.remove('show');
+}
+// Отфильтровать и отрисовать элементы палитры.
+function renderPalette() {
+  const list = document.getElementById('paletteList');
+  if (!list) return;
+  const q = (document.getElementById('paletteInput').value || '').trim().toLowerCase();
+  const items = [];
+  // Команды
+  paletteCommands().forEach(c => {
+    if (!q || c.label.toLowerCase().includes(q)) items.push({ label: c.label, hint: c.hint, run: c.run });
+  });
+  // Тэги
+  state.tags.map(t => t.name).filter(Boolean).sort((a, b) => a.localeCompare(b, LOCALE)).forEach(t => {
+    if (q && !t.toLowerCase().includes(q)) return;
+    items.push({ label: '🏷️ #' + t, hint: tagCount(t) + ' замет.', run: () => {
+      closePalette();
+      currentPath = [t];
+      const s = document.getElementById('search');
+      if (s) s.value = '';
+      searchQuery = '';
+      renderAll();      // рендерим уже без активного поиска
+      renderFacets();   // и пересобираем панель фильтров
+    } });
+  });
+  // Заметки (ограничить 20)
+  let noteMatches = 0;
+  state.notes.forEach(n => {
+    const title = n.title || UNTITLED;
+    if (q && !title.toLowerCase().includes(q)) return;
+    if (noteMatches >= 20) return;
+    noteMatches++;
+    items.push({ label: '📄 ' + title, hint: tagsOf(n).map(t => '#' + t).join(' '), run: () => { closePalette(); selectNote(n.id); } });
+  });
+  list.innerHTML = '';
+  if (items.length === 0) {
+    const e = document.createElement('div'); e.className = 'tm-empty'; e.textContent = 'Ничего не найдено';
+    list.appendChild(e); return;
+  }
+  items.slice(0, 40).forEach((it, i) => {
+    const d = document.createElement('div');
+    d.className = 'palette-item' + (i === 0 ? ' active' : '');
+    const nm = document.createElement('span'); nm.textContent = it.label;
+    const h = document.createElement('span'); h.className = 'pi-hint'; h.textContent = it.hint || '';
+    d.appendChild(nm); d.appendChild(h);
+    d.onmousedown = (e) => { e.preventDefault(); it.run(); };
+    list.appendChild(d);
+  });
+}
+// Клавиатурная навигация в палитре.
+function paletteKey(e) {
+  const list = document.getElementById('paletteList');
+  const items = [...list.querySelectorAll('.palette-item')];
+  if (items.length === 0) return;
+  let idx = items.findIndex(it => it.classList.contains('active'));
+  if (e.key === 'ArrowDown') { e.preventDefault(); idx = (idx + 1) % items.length; }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); idx = idx <= 0 ? items.length - 1 : idx - 1; }
+  else if (e.key === 'Enter') { e.preventDefault(); if (idx >= 0) items[idx].dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); return; }
+  else if (e.key === 'Escape') { e.preventDefault(); closePalette(); return; }
+  else return;
+  items.forEach(it => it.classList.remove('active'));
+  items[idx].classList.add('active');
+  items[idx].scrollIntoView({ block: 'nearest' });
+}
+
+function isPathActive(path) {
+  if (path.length !== currentPath.length) return false;
+  for (let i = 0; i < path.length; i++) if (path[i] !== currentPath[i]) return false;
+  return true;
+}
+// Развернуть всё дерево: очищаем набор свёрнутых веток.
+function expandAllTree() {
+  collapsed = new Set();
+  saveCollapsed();
+  treeDirty = true; // нужно построить ветки, которых ещё нет в DOM
+  renderTree();
+}
+// Свернуть всё дерево: сворачиваем все ветки, у которых есть дети.
+function collapseAllTree() {
+  const root = buildTree();
+  const all = new Set();
+  const walk = (node, parentPath) => {
+    node.children.forEach((child, name) => {
+      const path = parentPath ? parentPath.concat(name) : [name];
+      if (child.children.size > 0) all.add(path.join('/'));
+      walk(child, path);
+    });
+  };
+  walk(root, null);
+  collapsed = all;
+  saveCollapsed();
+  treeDirty = true;
+  renderTree();
+}
+
+// Разбор поискового запроса на составляющие:
+//   #тег           — заметка ДОЛЖНА содержать этот тэг;
+//   #"тег с пробелом" — тэг, имя которого содержит пробелы (в кавычках);
+//   -тег, !тег     — заметка НЕ должна содержать этот тэг;
+//   остальное      — свободный текст (заголовок/тело/тэги).
+// Токенизатор понимает кавычки для имён с пробелами.
+function tokenizeQuery(q) {
+  const toks = [];
+  const s = String(q || '');
+  let i = 0;
+  while (i < s.length) {
+    while (i < s.length && /\s/.test(s[i])) i++;
+    if (i >= s.length) break;
+    let tok = '';
+    while (i < s.length && !/\s/.test(s[i])) {
+      if (s[i] === '"') {
+        i++; // открывающая кавычка
+        while (i < s.length && s[i] !== '"') { tok += s[i]; i++; }
+        if (i < s.length && s[i] === '"') i++; // закрывающая кавычка
+      } else {
+        tok += s[i]; i++;
+      }
+    }
+    if (tok) toks.push(tok);
+  }
+  return toks;
+}
+// Разбор даты YYYY-MM-DD как ЛОКАЛЬНОЙ полуночи (new Date('YYYY-MM-DD') даёт UTC).
+function parseLocalDate(str) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(str || '').trim());
+  if (!m) return null;
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]));
+  return isNaN(d.getTime()) ? null : d.getTime();
+}
+function parseQuery(q) {
+  const parts = { text: [], title: [], includeTags: [], excludeTags: [], since: null, until: null };
+  // «since: 2024-01-01» (пробел после двоеточия) нормализуем в один токен.
+  const normalized = String(q == null ? '' : q).replace(/\b(since|until):\s+/gi, '$1:');
+  tokenizeQuery(normalized).forEach(tok => {
+    if (!tok) return;
+    if (tok[0] === '#' && tok.length > 1) parts.includeTags.push(tok.slice(1).toLowerCase());
+    else if ((tok[0] === '-' || tok[0] === '!') && tok.length > 1) parts.excludeTags.push(tok.slice(1).toLowerCase());
+    else if (/^title:/i.test(tok)) {
+      const v = tok.slice(6);
+      if (v) parts.title.push(v.toLowerCase());
+    }
+    else if (/^since:/i.test(tok)) {
+      const t = parseLocalDate(tok.slice(6));
+      if (t != null) parts.since = t;
+    }
+    else if (/^until:/i.test(tok)) {
+      const t = parseLocalDate(tok.slice(6));
+      if (t != null) parts.until = t + 86400000 - 1; // включительно до конца указанного дня
+    }
+    else parts.text.push(tok);
+  });
+  return parts;
+}
+// Кэш разобранного запроса: разбираем строку один раз на её изменение,
+// а не на каждую заметку в filter/renderFacets/cycleFacet.
+let parsedCacheKey = null;
+let parsedCacheValue = null;
+function getParsedQuery() {
+  if (parsedCacheKey !== searchQuery) {
+    parsedCacheKey = searchQuery;
+    parsedCacheValue = parseQuery(searchQuery);
+  }
+  return parsedCacheValue;
+}
+// Сериализовать тэг в токен запроса: имена с пробелами — в кавычках.
+function tagToken(name, prefix) {
+  const p = prefix || '';
+  return /[\s"]/.test(name) ? p + '"' + name.replace(/"/g, '') + '"' : p + name;
+}
+// Общий предикат поиска (используется и для списка, и для счётчика в breadcrumbs).
+function matchesSearch(n) {
+  if (!searchQuery) return true;
+  const q = getParsedQuery();
+  const noteTags = tagsLowerOf(n);
+  // include-тэги: все обязательны (точное совпадение имени)
+  for (const t of q.includeTags) if (!noteTags.includes(t)) return false;
+  // exclude-тэги: исключается заметка, если имя её тэга всего лишь содержит
+  // имя исключённого — такая формулировка симметрична include (точное).
+  // Решили: уточнение до точного совпадения включено и для exclude.
+  for (const t of q.excludeTags) if (noteTags.includes(t)) return false;
+  // Свободный текст: каждый токен должен найтись (логика «И») в заголовке,
+  // теле или тэгах заметки. Пустой набор — без ограничения.
+  if (q.text.length > 0) {
+    const hay = ((n.title || '') + '\n' + (n.body || '')).toLowerCase();
+    const tagsHay = noteTags;
+    for (const tok of q.text) {
+      const t = tok.toLowerCase();
+      if (!hay.includes(t) && !tagsHay.some(nm => nm.includes(t))) return false;
+    }
+  }
+  // Ограничение по заголовку: title:слово — все токены должны быть в заголовке.
+  if (q.title.length > 0) {
+    const titleLow = (n.title || '').toLowerCase();
+    for (const tok of q.title) if (!titleLow.includes(tok)) return false;
+  }
+  // Фильтр по дате обновления: since:YYYY-MM-DD / until:YYYY-MM-DD
+  const up = n.updated || n.created || 0;
+  if (q.since != null && up < q.since) return false;
+  if (q.until != null && up > q.until) return false;
+  return true;
+}
+// Заметки папки currentPath (без учёта поиска).
+function notesInPath() {
+  return state.notes.filter(n => noteBelongsToPath(n, currentPath));
+}
+
+// ---------- Markdown (безопасный поднабор) ----------
+// Экранирование HTML: защищает от XSS перед подстановкой в innerHTML.
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+// Рендер ограниченного поднабора Markdown в безопасный HTML.
+// Входной текст сначала экранируется, затем применяются простые правила.
+function renderMarkdown(src) {
+  // Пустая строка между абзацами: <div><br></div> даёт ровно одну пустую строку.
+  const GAP = '<div class="md-gap"><br></div>';
+  const inline = (s) => escapeHtml(s)
+    .replace(/`([^`\n]+)`/g, '<code class="md-inline">$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/~~([^~]+)~~/g, '<del>$1</del>')
+    .replace(/(^|[^*\w])\*([^*\n]+)\*/g, '$1<em>$2</em>')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+|mailto:[^)\s]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  const lines = (src || '').split('\n');
+  const out = [];
+  let listType = null;
+  let inCode = false;
+  let codeLines = [];
+  const flushList = () => {
+    if (listType) {
+      // CSS ожидает базовый класс .md-ul (+ .todo для чекбоксов); семантику
+      // нумерованного списка даёт сам тег <ol>.
+      const tag = listType === 'ol' ? 'ol' : 'ul';
+      const cls = listType === 'todo' ? 'md-ul todo' : 'md-ul';
+      out.push('<' + tag + ' class="' + cls + '">' + listBody.join('') + '</' + tag + '>');
+      listType = null; listBody = [];
+    }
+  };
+  let listBody = [];
+  const flushCode = () => {
+    if (inCode) { out.push('<pre class="md-code">' + escapeHtml(codeLines.join('\n')) + '</pre>'); inCode = false; codeLines = []; }
+  };
+  for (let idx = 0; idx < lines.length; idx++) {
+    let ln = lines[idx];
+    // Блок таблицы: подряд идущие строки | a | b | (вторая может быть |---|---|).
+    // Внутри блока кода (```...```) таблицы не парсим.
+    if (!inCode && /^\s*\|.*\|\s*$/.test(ln)) {
+      flushList();
+      const rows = [];
+      let j = idx;
+      while (j < lines.length && /^\s*\|.*\|\s*$/.test(lines[j])) { rows.push(lines[j]); j++; }
+      const parseRow = (r) => r.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => inline(c.trim()));
+      const isSep = (r) => /^\s*\|?[\s:|-]+\|?\s*$/.test(r) && /-/.test(r);
+      let body = '';
+      let start = 0;
+      if (rows.length > 1 && isSep(rows[1])) {
+        body += '<thead><tr>' + parseRow(rows[0]).map(c => '<th>' + c + '</th>').join('') + '</tr></thead>';
+        start = 2;
+      } else if (rows.length > 0 && isSep(rows[0])) {
+        start = 1;
+      }
+      body += '<tbody>' + rows.slice(start).map(r => '<tr>' + parseRow(r).map(c => '<td>' + c + '</td>').join('') + '</tr>').join('') + '</tbody>';
+      out.push('<div class="md-table-wrap"><table class="md-table">' + body + '</table></div>');
+      idx = j - 1; // продолжим со строки после таблицы
+      continue;
+    }
+    if (/^```/.test(ln)) {
+      flushList();
+      if (inCode) { flushCode(); }
+      else { inCode = true; codeLines = []; }
+      continue;
+    }
+    if (inCode) { codeLines.push(ln); continue; }
+    const h3 = ln.match(/^###\s+(.+)$/);
+    const h2 = ln.match(/^##\s+(.+)$/);
+    const h1 = ln.match(/^#\s+(.+)$/);
+    const quote = ln.match(/^>\s?(.*)$/);
+    const cbx = ln.match(/^\s*[-*]\s+\[( |x|X)\]\s+(.+)$/);
+    const li = ln.match(/^\s*[-*]\s+(.+)$/);
+    const oli = ln.match(/^\s*\d+[.)]\s+(.+)$/);
+    const hrT = /^\s*---\s*$/.test(ln) || /^\s*\*\*\*\s*$/.test(ln) || /^\s*___\s*$/.test(ln);
+    if (hrT) { flushList(); out.push('<hr class="md-hr">'); continue; }
+    // Пустая строка — это разделитель абзацев: сохраняем её как пустую строку,
+    // иначе абзацы слипаются (в т.ч. в предпросмотре и карточках).
+    if (ln.trim() === '') {
+      flushList();
+      if (out.length) out.push(GAP); // ведущие пустые строки пропускаем
+      continue;
+    }
+    if (cbx) {
+      if (listType !== 'todo') { flushList(); listType = 'todo'; listBody = []; }
+      const box = cbx[1].toLowerCase() === 'x' ? '☑' : '☐';
+      listBody.push('<li data-box="' + box + '">' + inline(cbx[2]) + '</li>');
+      continue;
+    }
+    if (oli) {
+      if (listType !== 'ol') { flushList(); listType = 'ol'; listBody = []; }
+      listBody.push('<li>' + inline(oli[1]) + '</li>');
+      continue;
+    }
+    if (li) {
+      if (listType !== 'ul') { flushList(); listType = 'ul'; listBody = []; }
+      listBody.push('<li>' + inline(li[1]) + '</li>');
+      continue;
+    }
+    if (quote) { flushList(); out.push('<div class="md-quote">' + (quote[1] ? inline(quote[1]) : '&nbsp;') + '</div>'); continue; }
+    flushList();
+    if (h1) out.push('<div class="md-h1">' + inline(h1[1]) + '</div>');
+    else if (h2) out.push('<div class="md-h2">' + inline(h2[1]) + '</div>');
+    else if (h3) out.push('<div class="md-h3">' + inline(h3[1]) + '</div>');
+    else out.push('<div>' + (ln ? inline(ln) : '<br>') + '</div>');
+  }
+  flushList(); flushCode();
+  // Хвостовые пустые строки не нужны: низ и так отделён отступом контейнера.
+  while (out.length && out[out.length - 1] === GAP) out.pop();
+  const res = out.join('\n');
+  return res;
+}
+// Термы для подсветки: свободный текст и title: из запроса (без #тэг/-тэг/since/until).
+// Термы подсветки. Кэшируются по строке запроса: highlightElement вызывается
+// для каждой карточки и не должен парсить один и тот же запрос заново.
+let queryTermsKey = null;
+let queryTermsCache = [];
+function queryTerms(query) {
+  const key = String(query || '');
+  if (key === queryTermsKey) return queryTermsCache;
+  const parts = (key === searchQuery) ? getParsedQuery() : parseQuery(key);
+  queryTermsKey = key;
+  queryTermsCache = [...new Set(parts.text.concat(parts.title).map(t => t.toLowerCase()).filter(Boolean))];
+  return queryTermsCache;
+}
+// Подсветка найденного в уже отрендеренном HTML — по ТЕКСТОВЫМ узлам, чтобы
+// случайно не залезть в атрибуты/имена тегов (поиск «http» ломал ссылки, «md» — классы).
+function highlightElement(root, query) {
+  if (!root || !query) return;
+  const terms = queryTerms(query).sort((a, b) => b.length - a.length);
+  if (!terms.length) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+  const nodes = [];
+  while (walker.nextNode()) {
+    const p = walker.currentNode.parentNode;
+    if (p && (p.nodeName === 'MARK' || p.nodeName === 'CODE' || p.nodeName === 'PRE')) continue;
+    nodes.push(walker.currentNode);
+  }
+  nodes.forEach(node => {
+    const text = node.nodeValue || '';
+    const lower = text.toLowerCase();
+    let i = 0, found = false;
+    const frag = document.createDocumentFragment();
+    while (i < text.length) {
+      let idx = -1, len = 0;
+      for (const t of terms) {
+        const k = lower.indexOf(t, i);
+        if (k !== -1 && (idx === -1 || k < idx)) { idx = k; len = t.length; }
+      }
+      if (idx === -1) break;
+      found = true;
+      if (idx > i) frag.appendChild(document.createTextNode(text.slice(i, idx)));
+      const mark = document.createElement('mark');
+      mark.textContent = text.slice(idx, idx + len);
+      frag.appendChild(mark);
+      i = idx + len;
+    }
+    if (!found) return;
+    if (i < text.length) frag.appendChild(document.createTextNode(text.slice(i)));
+    node.parentNode.replaceChild(frag, node);
+  });
+}
+
+// Сортировка списка заметок по режиму (по умолчанию — текущий sortMode).
+function sortNotes(notes, mode) {
+  const m = mode || sortMode;
+  const copy = notes.slice();
+  if (m === 'title') copy.sort((a, b) => (a.title || '').localeCompare(b.title || '', LOCALE));
+  else if (m === 'created') copy.sort((a, b) => (b.created || 0) - (a.created || 0));
+  else copy.sort((a, b) => (b.updated || 0) - (a.updated || 0));
+  return copy;
+}
+// Человекочитаемая подпись режима сортировки.
+function sortLabel(mode) {
+  const m = SORT_MODES.find(x => x.id === mode) || SORT_MODES[0];
+  return m.label;
+}
+function renderSortLabel() {
+  const btn = document.getElementById('sortBtn');
+  if (btn) btn.textContent = '↕ ' + sortLabel(sortMode);
+}
+function setSortMode(mode) {
+  sortMode = mode;
+  storageSet(SORT_KEY, sortMode);
+  renderSortLabel();
+  renderNotes();
+  renderBreadcrumbs();
+}
+// Меню выбора сортировки — вместо нативного <select> (у него в Chromium
+// меню пропадает при перерисовке DOM, приходилось удерживать кнопку мыши).
+function sortMenu() {
+  const btn = document.getElementById('sortBtn');
+  const rect = btn.getBoundingClientRect();
+  const items = SORT_MODES.map(m => ({
+    label: (sortMode === m.id ? '✓ ' : '') + m.label,
+    run: () => setSortMode(m.id)
+  }));
+  showCtxMenu(rect.left, rect.bottom + 4, items);
+}
+
+// Экспортировать только заметки, попадающие в текущий фильтр (поиск) или папку.
+function exportFound() {
+  const list = searchQuery ? state.notes.filter(matchesSearch) : notesInPath();
+  if (!list.length) { notify('🎯 Нечего экспортировать: пусто по текущему фильтру'); return; }
+  exportMd(list);
+  notify('🎯 Экспортировано: ' + list.length + ' заметок');
+}
+
+// Человеческий формат даты: «только что», «5 мин назад», «сегодня, 14:32», «вчера», «12 окт».
+function humanDate(ts) {
+  if (!ts) return '';
+  const now = Date.now();
+  const diff = now - ts;
+  if (diff < 60000) return 'только что';
+  if (diff < 3600000) return Math.floor(diff / 60000) + ' мин назад';
+  const d = new Date(ts);
+  const today = new Date(now);
+  const sameDay = d.toDateString() === today.toDateString();
+  const hm = d.toLocaleTimeString(LOCALE_DT, { hour: '2-digit', minute: '2-digit' });
+  if (sameDay) return 'сегодня, ' + hm;
+  const yesterday = new Date(now - 86400000);
+  if (d.toDateString() === yesterday.toDateString()) return 'вчера, ' + hm;
+  const opts = d.getFullYear() === today.getFullYear()
+    ? { day: '2-digit', month: 'short' }
+    : { day: '2-digit', month: 'short', year: 'numeric' };
+  return d.toLocaleDateString(LOCALE_DT, opts);
+}
+
+// Безопасный CSS-цвет для инлайн-стиля: импортированные данные могут содержать
+// произвольную строку, поэтому допускаем только hex/rgb/hsl/простое имя цвета.
+function safeCssColor(c) {
+  const s = String(c || '').trim();
+  if (/^#[0-9a-f]{3,8}$/i.test(s)) return s;
+  if (/^(rgb|rgba|hsl|hsla)\([0-9.,%\s]+\)$/i.test(s)) return s;
+  if (/^[a-z]{3,20}$/i.test(s)) return s;
+  return '';
+}
+// Короткое превью для карточки: таблицы выкидываем (в 96px они нечитаемы),
+// лишние пустые строки схлопываем, длину ограничиваем.
+function previewText(body) {
+  const cleaned = (body || '')
+    .split('\n')
+    .filter(line => !/^\s*\|.*\|\s*$/.test(line))
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n');
+  const limit = 140;
+  return cleaned.length > limit ? cleaned.slice(0, limit) + '…' : cleaned;
+}
+function renderNotes() {
+  const container = document.getElementById('notes');
+  // Поиск — глобальный: если введён запрос, ищем по всем заметкам всех папок,
+  // игнорируя текущую папку. Без запроса — показываем только заметки папки.
+  let notes = searchQuery ? state.notes.filter(matchesSearch) : notesInPath();
+
+  // сортировка по выбранному режиму (sortNotes возвращает отсортированную копию)
+  notes = sortNotes(notes, sortMode);
+  // закреплённые заметки — всегда сверху
+  notes = notes.filter(n => n.pinned).concat(notes.filter(n => !n.pinned));
+
+  if (notes.length === 0) {
+    let msg = searchQuery ? 'Ничего не найдено'
+      : (currentPath.length ? 'В этой папке пока нет заметок' : 'Нет заметок. Добавьте первую заметку или откройте файл данных.');
+    let transfer = '';
+    if (!searchQuery && currentPath.length === 0 && state.notes.length === 0) {
+      // Экран переноса: предлагаем открыть файл данных с другой машины.
+      transfer = '<div style="margin-top:12px;color:var(--muted)">Перенос данных: выберите файл «заметки-дерево.json» с предыдущего устройства.</div>' +
+        '<button class="primary" id="openDataBtn" style="margin-top:14px">📂 Открыть файл данных</button>';
+    }
+    container.innerHTML = `<div class="empty"><div class="big">🗂️</div><div>${msg}</div>${transfer}</div>`;
+    const openBtn = container.querySelector('#openDataBtn');
+    if (openBtn) openBtn.onclick = () => importData();
+    return;
+  }
+  // Карточки собираем одной строкой HTML (один парс вместо тысяч appendChild).
+  // Весь пользовательский текст — через escapeHtml, превью — через renderMarkdown.
+  const parts = notes.map(n => {
+    const preview = previewText(n.body);
+    const dt = humanDate(n.updated || n.created);
+    const tagsHtml = tagsOf(n).map(t => {
+      const c = safeCssColor(tagColor(t));
+      const style = c ? ` style="background:${c};color:#fff"` : '';
+      const title = escapeHtml('Открыть папку тэга «' + t + '»');
+      return `<span class="tag clk" title="${title}"${style}>${escapeHtml(t)}</span>`;
+    }).join('');
+    const cls = 'note-card' + (n.pinned ? ' pinned' : '') + (selectedId === n.id ? ' selected' : '');
+    return `<div class="${cls}" data-note-id="${escapeHtml(n.id)}" tabindex="0" draggable="true">`
+      + `<h3>${escapeHtml((n.pinned ? '📌 ' : '') + (n.title || UNTITLED))}</h3>`
+      + `<div class="preview">${renderMarkdown(preview)}</div>`
+      + `<div class="tags">${tagsHtml}</div>`
+      + `<div class="dt">Обновлено: ${escapeHtml(dt)}</div>`
+      + `</div>`;
+  });
+  container.innerHTML = parts.join('');
+  // Подсветка поиска — только в превью, по текстовым узлам (безопасно для HTML).
+  container.querySelectorAll('.preview').forEach(el => highlightElement(el, searchQuery));
+}
+
+// Навигация по карточкам заметок клавиатурой: стрелки — фокус, Enter — открыть,
+// Delete/Backspace — удалить (с подтверждением).
+function notesKeyNav(e) {
+  const cards = [...document.querySelectorAll('#notes .note-card')];
+  if (cards.length === 0) return;
+  const idx = cards.indexOf(document.activeElement);
+  const focusAt = (i) => { const c = cards[Math.max(0, Math.min(cards.length - 1, i))]; if (c) c.focus(); };
+  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); focusAt(idx + 1); }
+  else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); focusAt(idx - 1); }
+  else if (e.key === 'Home') { e.preventDefault(); focusAt(0); }
+  else if (e.key === 'End') { e.preventDefault(); focusAt(cards.length - 1); }
+  else if (e.key === 'Enter' && idx >= 0) {
+    e.preventDefault();
+    const id = cards[idx].dataset.noteId;
+    if (id) selectNote(id);
+  } else if ((e.key === 'Delete' || e.key === 'Backspace') && idx >= 0) {
+    e.preventDefault();
+    const id = cards[idx].dataset.noteId;
+    if (id) { editingId = id; deleteNote(); }
+  }
+}
+
+// Навигация клавиатурой по дереву: ↑↓ — между видимыми строками,
+// Enter/пробел — открыть папку, →/← — развернуть/свернуть.
+function treeKeyNav(e) {
+  const rows = [...document.querySelectorAll('#tree .node-row, #tree .root-note')];
+  if (rows.length === 0) return;
+  const idx = rows.indexOf(document.activeElement);
+  const focusAt = (i) => { const r = rows[Math.max(0, Math.min(rows.length - 1, i))]; if (r) r.focus(); };
+  // Активация строки пересобирает дерево (renderAll) — запоминаем «адрес» строки,
+  // чтобы вернуть на неё фокус после перерисовки.
+  const rowKey = (el) => el ? (el.dataset.path != null ? 'p:' + el.dataset.path : (el.dataset.noteId ? 'n:' + el.dataset.noteId : '')) : '';
+  const restoreFocus = (key) => {
+    if (!key) return;
+    const found = [...document.querySelectorAll('#tree .node-row, #tree .root-note')].find(el => rowKey(el) === key);
+    if (found) found.focus();
+  };
+  if (e.key === 'ArrowDown') { e.preventDefault(); focusAt(idx + 1); }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); focusAt(idx - 1); }
+  else if (e.key === 'Enter' && idx >= 0) { e.preventDefault(); const k = rowKey(rows[idx]); rows[idx].click(); restoreFocus(k); }
+  else if (e.key === 'ArrowRight' && idx >= 0) {
+    // развернуть: прокликиваем, если строка свёрнута
+    const chev = rows[idx].querySelector('.chevron');
+    if (chev && chev.textContent === '▸') { e.preventDefault(); const k = rowKey(rows[idx]); rows[idx].click(); restoreFocus(k); }
+  } else if (e.key === 'ArrowLeft' && idx >= 0) {
+    const chev = rows[idx].querySelector('.chevron');
+    if (chev && chev.textContent === '▾') { e.preventDefault(); const k = rowKey(rows[idx]); rows[idx].click(); restoreFocus(k); }
+  }
+}
+
+function renderBreadcrumbs() {
+  const el = document.getElementById('breadcrumbs');
+  el.innerHTML = '';
+  const home = document.createElement('span');
+  home.className = 'crumb';
+  home.textContent = '🏠 Все без тэга';
+  home.onclick = () => goToPath([]);
+  el.appendChild(home);
+  currentPath.forEach((tag, i) => {
+    const sep = document.createElement('span');
+    sep.className = 'sep';
+    sep.textContent = ' / ';
+    el.appendChild(sep);
+    const crumb = document.createElement('span');
+    crumb.className = 'crumb';
+    crumb.textContent = tag;
+    const thisPath = currentPath.slice(0, i + 1);
+    crumb.onclick = () => goToPath(thisPath);
+    el.appendChild(crumb);
+  });
+  const cnt = document.createElement('span');
+  cnt.className = 'cnt';
+  const count = (searchQuery ? state.notes.filter(matchesSearch) : notesInPath()).length;
+  cnt.textContent = searchQuery ? (count + ' найдено') : (count + ' заметок');
+  el.appendChild(cnt);
+}
+
+// Перерисовать интерфейс. Флаги позволяют не пересобирать лишние части:
+// renderAll({ tree: false }) — когда данные дерева не менялись.
+function renderAll(opts) {
+  const o = opts || {};
+  if (o.tree !== false) renderTree();
+  if (o.crumbs !== false) renderBreadcrumbs();
+  if (o.notes !== false) renderNotes();
+  if (o.noteView !== false) renderNoteView();
+  if (o.view !== false) saveLastView();
+}
+
+// Запомнить текущее место (путь + поисковый запрос) для восстановления при перезагрузке.
+// Пишем только при изменении, чтобы не трогать localStorage на каждый рендер.
+let lastViewJSON = null;
+function saveLastView() {
+  const json = JSON.stringify({ path: currentPath, q: searchQuery || '' });
+  if (json === lastViewJSON) return;
+  try {
+    storageSet(VIEW_KEY, json);
+    lastViewJSON = json;
+  } catch (e) { /* ignore */ }
+}
+// Восстановить последнее место; вызывается один раз при старте.
+function restoreLastView() {
+  try {
+    const raw = storageGet(VIEW_KEY);
+    if (!raw) return false;
+    const v = JSON.parse(raw);
+    if (Array.isArray(v.path) && v.path.length) {
+      // Тэги плоские (без parentId): оставляем только сегменты, существующие в таблице.
+      const valid = [];
+      for (const seg of v.path) {
+        const t = state.tags.find(x => x.name === seg);
+        if (t) valid.push(t.name); else break;
+      }
+      currentPath = valid;
+    }
+    if (typeof v.q === 'string' && v.q) { searchQuery = v.q; const s = document.getElementById('search'); if (s) s.value = v.q; }
+    return true;
+  } catch (e) { return false; }
+}
+
+// ---------- Просмотр заметки ----------
+// Найти карточку заметки в списке (без CSS.escape — он есть не везде).
+function findNoteCard(id) {
+  const cards = document.querySelectorAll('#notes .note-card');
+  for (const c of cards) if (c.dataset.noteId === id) return c;
+  return null;
+}
+// Сбросить ширину списка, зафиксированную при открытии просмотра.
+function resetNoteListWidth() {
+  const notesEl = document.getElementById('notes');
+  if (notesEl) notesEl.style.flex = '';
+}
+// Клик по карточке показывает заметку целиком в правой части (не миниатюрой).
+// Редактор открывается отдельно: двойным кликом, кнопкой «✎» или из меню.
+function openNoteView(id) {
+  const n = noteById(id);
+  if (!n) return;
+  const split = document.getElementById('contentSplit');
+  const notesEl = document.getElementById('notes');
+  const wasOpen = !!(split && split.classList.contains('has-view'));
+  // Запоминаем ширину карточки до сужения списка: после открытия просмотра
+  // она должна остаться прежней, иначе карточка «прыгает» в размере.
+  const before = (!wasOpen && notesEl) ? findNoteCard(id) : null;
+  const widthBefore = before ? before.getBoundingClientRect().width : 0;
+
+  viewingId = id;
+  selectedId = id;
+  // Подсветку меняем на месте: пересборка списка сбросила бы прокрутку.
+  let cardEl = null;
+  document.querySelectorAll('#notes .note-card').forEach(c => {
+    const on = c.dataset.noteId === id;
+    c.classList.toggle('selected', on);
+    if (on) cardEl = c;
+  });
+  renderNoteView();
+  // Подгоняем ширину списка под прежнюю ширину карточки (с учётом отступов,
+  // скроллбара и того, что колонка стала одна). Просмотру оставляем ≥300px.
+  if (widthBefore > 0 && notesEl && split) {
+    const cardNow = findNoteCard(id);
+    if (cardNow) {
+      const listW = notesEl.getBoundingClientRect().width;
+      const splitW = split.getBoundingClientRect().width;
+      let target = listW + (widthBefore - cardNow.getBoundingClientRect().width);
+      if (splitW > 300) target = Math.min(target, splitW - 300);
+      target = Math.max(280, target);
+      notesEl.style.flex = '0 0 ' + Math.round(target) + 'px';
+      // Одна корректировка на случай, если из-за новой ширины появился/исчез
+      // вертикальный скроллбар.
+      const after = findNoteCard(id);
+      if (after) {
+        const diff = widthBefore - after.getBoundingClientRect().width;
+        if (Math.abs(diff) >= 1) notesEl.style.flex = '0 0 ' + Math.round(target + diff) + 'px';
+      }
+    }
+  }
+  // После сужения колонки карточка могла уехать за край — показываем её.
+  if (cardEl && typeof cardEl.scrollIntoView === 'function') {
+    try { cardEl.scrollIntoView({ block: 'nearest' }); } catch (e) {}
+  }
+  toggleSidebarIfMobile();
+}
+function closeNoteView() {
+  if (!viewingId) return;
+  viewingId = null;
+  renderNoteView();
+  const card = document.querySelector('#notes .note-card.selected');
+  if (card) { try { card.focus(); } catch (e) {} }
+}
+// Сменить папку/фильтр: просмотр закрываем, чтобы не показывать заметку вне контекста.
+function goToPath(path) {
+  viewingId = null;
+  currentPath = path;
+  renderAll();
+}
+// Перерисовать правую панель по viewingId. Всё пользовательское — через
+// escapeHtml/renderMarkdown, цвета — через safeCssColor (анти-XSS).
+function renderNoteView() {
+  const box = document.getElementById('noteView');
+  const split = document.getElementById('contentSplit');
+  if (!box || !split) return;
+  const n = viewingId ? noteById(viewingId) : null;
+  if (!n) viewingId = null; // заметку удалили или данные заменили — просто закрываем
+  split.classList.toggle('has-view', !!n);
+  if (!n) { resetNoteListWidth(); box.innerHTML = ''; return; }
+  const upd = humanDate(n.updated || n.created);
+  const cre = humanDate(n.created || n.updated);
+  const tagsHtml = tagsOf(n).map(t => {
+    const c = safeCssColor(tagColor(t));
+    const style = c ? ` style="background:${c};color:#fff"` : '';
+    return `<span class="tag clk" data-tag="${escapeHtml(t)}" title="Открыть папку тэга">${escapeHtml(t)}</span>`;
+  }).join('');
+  const bodyHtml = (n.body && n.body.trim())
+    ? `<div class="nv-body">${renderMarkdown(n.body)}</div>`
+    : '<div class="nv-empty">Текст заметки пуст. Нажмите «✎ Редактировать», чтобы добавить.</div>';
+  box.innerHTML = '<div class="nv-head">'
+    + '<button type="button" class="nv-close" id="noteViewClose" title="Закрыть просмотр (Esc)">'
+    + '<span class="nv-close-x">✕ Закрыть</span><span class="nv-close-back">← К списку</span></button>'
+    + '<span class="spacer"></span>'
+    + '<button type="button" class="primary nv-edit" id="noteViewEdit">✎ Редактировать</button>'
+    + '</div>'
+    // Текст — в отдельной прокручиваемой области, чтобы шапка не уезжала.
+    + '<div class="nv-scroll">'
+    + `<h1 class="nv-title">${n.pinned ? '📌 ' : ''}${escapeHtml(n.title || UNTITLED)}</h1>`
+    + '<div class="nv-meta">'
+    + (tagsHtml ? `<div class="nv-tags">${tagsHtml}</div>` : '')
+    + `<span>Обновлено: ${escapeHtml(upd)}</span>`
+    + `<span>· Создано: ${escapeHtml(cre)}</span>`
+    + (n.history && n.history.length ? `<span>· Снимков истории: ${n.history.length}</span>` : '')
+    + '</div>'
+    + bodyHtml
+    + '</div>';
+}
+
+// ---------- Note selection / editor ----------
+// Выбор заметки = полный просмотр (редактор — отдельным действием).
+function selectNote(id) {
+  openNoteView(id);
+}
+function openEditor(id) {
+  cancelMdPreview();
+  editingId = id || null;
+  if (id) selectedId = id;
+  currentTags = [];
+  const n = id ? noteById(id) : null;
+  document.getElementById('modalTitle').textContent = n ? 'Редактировать заметку' : 'Новая заметка';
+  document.getElementById('fTitle').value = n ? n.title : '';
+  document.getElementById('fBody').value = n ? n.body : '';
+  currentTags = n ? tagsOf(n) : (currentPath.length ? currentPath.slice() : []);
+  document.getElementById('btnDelete').style.display = n ? 'inline-block' : 'none';
+  document.getElementById('fTags').value = ''; // не тащим недописанный тэг из прошлого раза
+  closeFindBar();
+  renderTagBadges();
+  renderTagHints();
+  hideTagSuggest();
+  setMdMode('edit'); // всегда открываем в режиме редактирования
+  updateMdWordCount(document.getElementById('fBody').value);
+  editorSnapshot = editorStateString();
+  document.getElementById('modalMask').classList.add('show');
+  const titleEl = document.getElementById('fTitle');
+  titleEl.focus();
+  // Длинный заголовок не должен открываться «с конца»: показываем начало.
+  titleEl.scrollLeft = 0;
+}
+// Строка состояния редактора для обнаружения несохранённых изменений.
+function editorStateString() {
+  return [
+    document.getElementById('fTitle').value,
+    document.getElementById('fBody').value,
+    currentTags.slice().sort().join('\u0001')
+  ].join('\u0002');
+}
+// Есть ли в редакторе несохранённые изменения.
+function editorDirty() {
+  const mask = document.getElementById('modalMask');
+  if (!mask.classList.contains('show')) return false;
+  return editorStateString() !== editorSnapshot;
+}
+// Запросить закрытие редактора: если есть изменения — подтвердить.
+async function requestCloseEditor() {
+  if (editorDirty()) {
+    const ok = await dialogConfirm('В заметке есть несохранённые изменения. Закрыть без сохранения?');
+    if (!ok) return;
+  }
+  closeEditor();
+}
+function closeEditor() {
+  cancelMdPreview();
+  document.getElementById('modalMask').classList.remove('show');
+  hideTagSuggest();
+  editingId = null;
+}
+function addTagInput() {
+  const input = document.getElementById('fTags');
+  const raw = input.value.trim();
+  if (!raw) return;
+  if (raw.indexOf(',') >= 0 || raw.indexOf('/') >= 0) {
+    raw.split(/[,/]+/).map(s => s.trim()).filter(Boolean).forEach(addTag);
+  } else {
+    addTag(raw);
+  }
+  input.value = '';
+  hideTagSuggest();
+  renderTagBadges();
+  renderTagHints();
+}
+function addTag(t) {
+  if (!t) return;
+  if (currentTags.some(x => x.toLowerCase() === t.toLowerCase())) return;
+  currentTags.push(t);
+}
+function removeTag(index) { currentTags.splice(index, 1); renderTagBadges(); renderTagHints(); }
+function renderTagBadges() {
+  const el = document.getElementById('tagBadges');
+  el.innerHTML = '';
+  currentTags.forEach((t, i) => {
+    const b = document.createElement('span');
+    b.className = 'tag-badge';
+    b.innerHTML = `<span></span><span class="x">✕</span>`;
+    b.querySelector('span').textContent = t;
+    b.querySelector('.x').onclick = () => removeTag(i);
+    el.appendChild(b);
+  });
+}
+// Количество заметок с тэгом (по имени).
+// Строится за один проход по всем заметкам и кэшируется до изменения данных
+// (сброс выполняется в invalidateTree), чтобы избежать O(N) на каждый вызов.
+let tagCountsCache = null;
+function tagCounts() {
+  if (tagCountsCache) return tagCountsCache;
+  const map = new Map();
+  state.notes.forEach(n => tagsOf(n).forEach(t => map.set(t, (map.get(t) || 0) + 1)));
+  tagCountsCache = map;
+  return map;
+}
+function tagCount(name) { return tagCounts().get(name) || 0; }
+function renderTagHints() {
+  const el = document.getElementById('tagHints');
+  el.innerHTML = '';
+  const existing = allTags().filter(t => !currentTags.some(c => c.toLowerCase() === t.toLowerCase()));
+  existing.slice(0, 8).forEach(t => {
+    const h = document.createElement('span');
+    h.className = 'tag-hint';
+    h.textContent = '+ ' + t + ' (' + tagCount(t) + ')';
+    h.onclick = () => { addTag(t); renderTagBadges(); renderTagHints(); };
+    el.appendChild(h);
+  });
+}
+function tagInputKey(e) {
+  if (e.key === 'Enter') { e.preventDefault(); addTagInput(); return; }
+  // Навигация по подсказкам автодополнения
+  const box = document.getElementById('tagSuggest');
+  if (!box || !box.classList.contains('show')) return;
+  const items = [...box.querySelectorAll('.ts')];
+  if (items.length === 0) return;
+  let idx = items.findIndex(it => it.classList.contains('active'));
+  if (e.key === 'ArrowDown') { e.preventDefault(); idx = (idx + 1) % items.length; }
+  else if (e.key === 'ArrowUp') { e.preventDefault(); idx = idx <= 0 ? items.length - 1 : idx - 1; }
+  else if (e.key === 'Escape') { e.preventDefault(); hideTagSuggest(); return; }
+  else return;
+  items.forEach(it => it.classList.remove('active'));
+  items[idx].classList.add('active');
+  items[idx].scrollIntoView({ block: 'nearest' });
+}
+// Автодополнение существующих тэгов в поле ввода тэга редактора.
+function updateTagSuggest() {
+  const input = document.getElementById('fTags');
+  const box = document.getElementById('tagSuggest');
+  if (!input || !box) return;
+  const frag = input.value.trim().toLowerCase();
+  if (!frag) { hideTagSuggest(); return; }
+  // не подсказываем, если уже выбран этот тэг
+  const existing = allTags().filter(t => !currentTags.some(c => c.toLowerCase() === t.toLowerCase()))
+    .filter(t => fuzzyMatch(frag, t) || t.toLowerCase().includes(frag));
+  if (existing.length === 0) { hideTagSuggest(); return; }
+  box.innerHTML = '';
+  existing.slice(0, 10).forEach(t => {
+    const d = document.createElement('div');
+    d.className = 'ts';
+    const nm = document.createElement('span'); nm.textContent = t;
+    const c = document.createElement('span'); c.className = 'cnt'; c.textContent = tagCount(t);
+    d.appendChild(nm); d.appendChild(c);
+    // mousedown, чтобы не терять фокус с input и успеть обработать
+    d.onmousedown = (e) => { e.preventDefault(); applyTagSuggest(t); };
+    box.appendChild(d);
+  });
+  box.classList.add('show');
+}
+function hideTagSuggest() {
+  const box = document.getElementById('tagSuggest');
+  if (box) { box.classList.remove('show'); box.innerHTML = ''; }
+}
+// Подставить выбранный тэг в поле и сразу добавить его в текущие тэги.
+function applyTagSuggest(tag) {
+  const input = document.getElementById('fTags');
+  if (input) input.value = '';
+  hideTagSuggest();
+  addTag(tag);
+  renderTagBadges();
+  renderTagHints();
+  if (input) input.focus();
+}
+
+// ---------- Markdown-предпросмотр в редакторе ----------
+let mdMode = 'edit'; // 'edit' | 'split' | 'preview'
+let mdPreviewTimer = null;
+// Отложенный пересчёт предпросмотра: при живом вводе не рендерим на каждую букву.
+function scheduleMdPreview() {
+  if (mdPreviewTimer) clearTimeout(mdPreviewTimer);
+  mdPreviewTimer = setTimeout(() => { mdPreviewTimer = null; updateMdPreview(); }, 100);
+}
+function cancelMdPreview() {
+  if (mdPreviewTimer) { clearTimeout(mdPreviewTimer); mdPreviewTimer = null; }
+}
+function updateMdPreview() {
+  const src = document.getElementById('fBody').value;
+  const box = document.getElementById('mdPreview');
+  const html = renderMarkdown(src) || '';
+  box.innerHTML = html || '<span class="md-empty">Пусто — начните печатать слева</span>';
+  updateMdWordCount(src);
+  updateMdToc();
+  syncMdScroll();
+}
+function updateMdWordCount(src) {
+  const el = document.getElementById('mdWordCount');
+  if (!el) return;
+  const words = (src || '').trim() ? (src || '').trim().split(/\s+/).length : 0;
+  const chars = (src || '').length;
+  el.textContent = words + ' слов · ' + chars + ' симв';
+}
+// Синхронный скролл предпросмотра с текстовой областью (в режиме «Разделить»).
+function syncMdScroll() {
+  if (mdMode !== 'split') return;
+  const ta = document.getElementById('fBody');
+  const box = document.getElementById('mdPreview');
+  const p = ta.scrollTop / (ta.scrollHeight - ta.clientHeight || 1);
+  box.scrollTop = box.scrollHeight ? p * (box.scrollHeight - box.clientHeight) : 0;
+}
+function setMdMode(mode) {
+  cancelMdPreview(); // дальше рендерим синхронно
+  mdMode = mode;
+  const editBtn = document.getElementById('mdEditBtn');
+  const prevBtn = document.getElementById('mdPreviewBtn');
+  const splitBtn = document.getElementById('mdSplitBtn');
+  const body = document.getElementById('fBody');
+  const box = document.getElementById('mdPreview');
+  const mdBody = document.querySelector('.md-body');
+  editBtn.classList.toggle('active', mode === 'edit');
+  prevBtn.classList.toggle('active', mode === 'preview');
+  splitBtn.classList.toggle('active', mode === 'split');
+  mdBody.classList.toggle('split', mode === 'split');
+  if (mode === 'edit') {
+    body.style.display = '';
+    box.style.display = 'none';
+  } else if (mode === 'preview') {
+    body.style.display = 'none';
+    box.style.display = 'block';
+    updateMdPreview();
+  } else { // split
+    body.style.display = '';
+    box.style.display = 'block';
+    updateMdPreview();
+  }
+}
+// ---------- Тулбар Markdown: применение разметки к выделению ----------
+function applyMdFormat(cmd) {
+  const ta = document.getElementById('fBody');
+  const start = ta.selectionStart, end = ta.selectionEnd;
+  const sel = ta.value.slice(start, end);
+  let replace = null, cursor = start;
+  const wrap = (pre, post) => {
+    const inner = sel || 'текст';
+    replace = pre + inner + post;
+    cursor = start + pre.length + (sel ? inner.length : 0);
+  };
+  switch (cmd) {
+    case 'h1': replace = '# ' + (sel || 'Заголовок'); cursor = (sel ? end + 2 : start + 2); break;
+    case 'h2': replace = '## ' + (sel || 'Заголовок'); cursor = (sel ? end + 3 : start + 3); break;
+    case 'h3': replace = '### ' + (sel || 'Заголовок'); cursor = (sel ? end + 4 : start + 4); break;
+    case 'bold': wrap('**', '**'); break;
+    case 'italic': wrap('*', '*'); break;
+    case 'strike': wrap('~~', '~~'); break;
+    case 'code': wrap('`', '`'); break;
+    case 'quote': replace = '> ' + (sel || 'Цитата').split('\n').join('\n> '); cursor = (sel ? end + sel.split('\n').length * 2 : start + 2); break;
+    case 'ul': replace = '- ' + (sel || 'Пункт').split('\n').join('\n- '); cursor = (sel ? end + sel.split('\n').length * 2 : start + 2); break;
+    case 'ol': replace = '1. ' + (sel || 'Пункт').split('\n').map((l, i) => (l.trim() ? (i + 1) + '. ' + l : l)).join('\n'); cursor = (sel ? end + 3 : start + 3); break;
+    case 'list-todo': replace = '- [ ] ' + (sel || 'Задача').split('\n').join('\n- [ ] '); cursor = (sel ? end + 6 : start + 6); break;
+    case 'hr': replace = (start > 0 ? '\n' : '') + '---' + (end < ta.value.length ? '\n' : ''); cursor = start + 5; break;
+    case 'table': {
+      const tbl = '\n| Колонка 1 | Колонка 2 |\n| --- | --- |\n|  |  |\n';
+      replace = tbl; cursor = start + tbl.length; break;
+    }
+    case 'link': { const inner = sel || 'текст'; replace = '[' + inner + '](https://)'; cursor = start + (sel ? replace.length : 1); break; }
+    case 'clear': replace = sel; cursor = start; break;
+    default: return;
+  }
+  if (replace === null) return;
+  ta.setRangeText(replace, start, end, 'end');
+  ta.focus();
+  ta.setSelectionRange(cursor, cursor);
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+// ---------- Поиск и замена в редакторе ----------
+function openFindBar() {
+  const bar = document.getElementById('mdFindbar');
+  if (!bar) return;
+  bar.classList.add('show');
+  const inp = document.getElementById('mdFind');
+  const ta = document.getElementById('fBody');
+  const sel = ta.value.slice(ta.selectionStart, ta.selectionEnd);
+  if (sel && !sel.includes('\n')) inp.value = sel;
+  inp.focus();
+  inp.select();
+}
+function closeFindBar() {
+  const bar = document.getElementById('mdFindbar');
+  if (bar) bar.classList.remove('show');
+}
+function mdFindNext() {
+  const ta = document.getElementById('fBody');
+  const q = document.getElementById('mdFind').value;
+  if (!q) return false;
+  const from = ta.selectionEnd || 0;
+  let idx = ta.value.toLowerCase().indexOf(q.toLowerCase(), from);
+  if (idx === -1) idx = ta.value.toLowerCase().indexOf(q.toLowerCase());
+  if (idx === -1) { notify('🔎 Не найдено'); return false; }
+  ta.focus();
+  ta.setSelectionRange(idx, idx + q.length);
+  return true;
+}
+function mdReplaceOne() {
+  const ta = document.getElementById('fBody');
+  const q = document.getElementById('mdFind').value;
+  const rep = document.getElementById('mdReplace').value;
+  if (!q) return;
+  const sel = ta.value.slice(ta.selectionStart, ta.selectionEnd);
+  if (sel.toLowerCase() !== q.toLowerCase()) { if (!mdFindNext()) return; }
+  const s = ta.selectionStart, e = ta.selectionEnd;
+  ta.setRangeText(rep, s, e, 'end');
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
+  mdFindNext();
+}
+function mdReplaceAll() {
+  const ta = document.getElementById('fBody');
+  const q = document.getElementById('mdFind').value;
+  const rep = document.getElementById('mdReplace').value;
+  if (!q) return;
+  const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+  const count = (ta.value.match(re) || []).length;
+  if (count === 0) { notify('🔎 Не найдено'); return; }
+  ta.value = ta.value.replace(re, rep);
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
+  notify('✅ Заменено: ' + count);
+}
+
+// ---------- Оглавление (TOC) заметки ----------
+let mdTocSig = null;
+function updateMdToc() {
+  const box = document.getElementById('mdToc');
+  if (!box) return;
+  const src = document.getElementById('fBody').value || '';
+  const heads = [];
+  src.split('\n').forEach((l, i) => {
+    const m = /^(#{1,3})\s+(.+)$/.exec(l);
+    if (m) heads.push({ level: m[1].length, text: m[2].trim(), line: i });
+  });
+  // Пересобираем оглавление только при изменении набора заголовков.
+  const sig = heads.length < 2 ? '' : heads.map(h => h.level + ':' + h.line + ':' + h.text).join('\n');
+  if (sig === mdTocSig) return;
+  mdTocSig = sig;
+  if (heads.length < 2) { box.classList.remove('show'); box.innerHTML = ''; return; }
+  box.innerHTML = '';
+  heads.forEach(h => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'toc-item t' + h.level;
+    b.textContent = h.text;
+    b.title = h.text;
+    b.addEventListener('click', () => {
+      const ta = document.getElementById('fBody');
+      // Позицию считаем по актуальному тексту: оглавление может быть закэшировано.
+      const cur = ta.value || '';
+      let pos = 0;
+      for (let i = 0; i < h.line; i++) pos += (cur.split('\n')[i] || '').length + 1;
+      ta.focus();
+      ta.setSelectionRange(pos, pos + h.text.length);
+      ta.scrollTop = (pos / Math.max(1, cur.length)) * ta.scrollHeight;
+    });
+    box.appendChild(b);
+  });
+  box.classList.add('show');
+}
+
+// Добавить снимок текущего состояния заметки в историю (ограничение 20).
+function pushHistory(n) {
+  if (!n) return;
+  if (!Array.isArray(n.history)) n.history = [];
+  n.history.unshift({ title: n.title || '', body: n.body || '', ts: n.updated || Date.now() });
+  if (n.history.length > 20) n.history.length = 20;
+}
+
+function saveNote() {
+  const title = document.getElementById('fTitle').value.trim();
+  const body = document.getElementById('fBody').value;
+  // Если в поле тэгов остался введённый, но не подтверждённый текст — учесть его.
+  const rawTags = document.getElementById('fTags').value;
+  if (rawTags.trim()) addTagInput();
+  const names = currentTags.slice();
+  if (!title && !body && names.length === 0) { notify('⚠️ Пустая заметка не сохранена'); return; }
+  // Конвертируем имена тэгов в id (таблица тэгов), сохраняя порядок и дедупликацию.
+  const ids = [];
+  names.forEach(name => { const id = ensureTag(name); if (id && !ids.includes(id)) ids.push(id); });
+  rebuildTagIndex();
+  invalidateTree();
+  if (editingId) {
+    const n = noteById(editingId);
+    if (n) {
+      // Снимок предыдущей версии — только если содержимое реально изменилось.
+      if (n.title !== title || n.body !== body) pushHistory(n);
+      n.title = title; n.body = body; n.tagIds = ids; n.updated = Date.now();
+    }
+  } else {
+    state.notes.push(normalizeNote({ title, body, tagIds: ids, created: Date.now(), updated: Date.now() }));
+  }
+  saveState();
+  saveToFile();
+  renderAll();
+  closeEditor();
+  notify('✅ Заметка сохранена');
+}
+async function deleteNote() {
+  if (!editingId) return;
+  const ok = await dialogConfirm('Удалить заметку?');
+  if (!ok) return;
+  prepareUndo('удаление заметки');
+  const victim = noteById(editingId);
+  if (victim) moveToTrash(victim);
+  state.notes = state.notes.filter(x => x.id !== editingId);
+  invalidateTree();
+  saveState();
+  saveToFile();
+  renderAll();
+  closeEditor();
+  notify('🗑️ Заметка удалена');
+}
+
+// ---------- Search ----------
+function onSearch(v) {
+  searchQuery = v.trim();
+  if (viewingId) { viewingId = null; renderNoteView(); }
+  renderNotes();
+  renderBreadcrumbs();
+  updateSearchSuggest();
+  renderFacets();
+}
+// Нечёткое совпадение: все символы запроса встречаются по порядку (subsequence).
+function fuzzyMatch(query, target) {
+  const q = query.toLowerCase(), t = target.toLowerCase();
+  if (!q) return true;
+  if (t.includes(q)) return true; // быстрое точное вхождение
+  let i = 0;
+  for (let j = 0; j < t.length && i < q.length; j++) if (t[j] === q[i]) i++;
+  return i === q.length;
+}
+// Автодополнение тэгов: если последний токен начинается с '#' — предлагаем тэги.
+function updateSearchSuggest() {
+  const input = document.getElementById('search');
+  const box = document.getElementById('searchSuggest');
+  if (!input || !box) return;
+  const val = input.value;
+  const m = val.match(/(^|\s)#([^\s]*)$/);
+  if (!m) { hideSearchSuggest(); return; }
+  const frag = m[2];
+  const list = allTags().filter(t => fuzzyMatch(frag, t));
+  if (list.length === 0) { hideSearchSuggest(); return; }
+  box.innerHTML = '';
+  list.slice(0, 12).forEach(t => {
+    const d = document.createElement('div');
+    d.className = 'sugg';
+    const nm = document.createElement('span');
+    nm.textContent = tagToken(t, '#');
+    const c = document.createElement('span');
+    c.className = 'cnt';
+    c.textContent = tagCount(t);
+    d.appendChild(nm); d.appendChild(c);
+    d.onclick = () => applySearchSuggest(t);
+    box.appendChild(d);
+  });
+  box.classList.add('show');
+}
+// Подставить выбранный тэг в поле поиска (заменяет недописанный #фрагмент).
+function applySearchSuggest(tag) {
+  const input = document.getElementById('search');
+  // Заменяем недописанный #фрагмент (в конце, до пробела) на токен тэга.
+  const val = input.value.replace(/(^|\s)#([^\s]*)$/, '$1') + tagToken(tag, '#') + ' ';
+  input.value = val;
+  hideSearchSuggest();
+  onSearch(val);
+  input.focus();
+}
+function hideSearchSuggest() {
+  const box = document.getElementById('searchSuggest');
+  if (box) { box.classList.remove('show'); box.innerHTML = ''; }
+}
+// ---------- Фасеты (динамические фильтры по тэгам) ----------
+// Список строится по заметкам, уже прошедшим выбранные фильтры (#тэг),
+// поэтому показываются только тэги, сочетающиеся с выбором. Активные
+// (включённые/исключённые) тэги показываются всегда и подсвечиваются.
+function renderFacets() {
+  const body = document.getElementById('facetsBody');
+  const cntEl = document.getElementById('facetsCount');
+  const resetBtn = document.getElementById('facetsReset');
+  if (!body) return;
+  const q = getParsedQuery();
+  const inc = new Set(q.includeTags);
+  const exc = new Set(q.excludeTags);
+  const activeCount = inc.size + exc.size;
+  cntEl.textContent = activeCount ? '(' + activeCount + ')' : '';
+  if (resetBtn) resetBtn.style.display = activeCount ? 'inline-block' : 'none';
+
+  // Набор заметок, прошедших ВСЕ включённые фильтры.
+  const included = state.notes.filter(n => {
+    const nt = tagsLowerOf(n);
+    for (const t of inc) if (!nt.includes(t)) return false;
+    return true;
+  });
+
+  // Счётчики тэгов только из этого набора (исключённые — не предлагаем).
+  const counts = new Map();
+  included.forEach(n => {
+    tagsOf(n).forEach(t => {
+      if (exc.has(t.toLowerCase())) return;
+      counts.set(t, (counts.get(t) || 0) + 1);
+    });
+  });
+
+  // Формируем список: сначала активные тэги (всегда видимы, даже при 0),
+  // затем остальные тэги из сочетания, по алфавиту.
+  const ordered = [];
+  const seen = new Set();
+  // активные — берём из запроса, а не из state.tags (не зависят от таблицы)
+  const activeNames = [];
+  // сопоставим регистронезависимо с реальными именами из counts/state.tags
+  const canonical = new Map();
+  counts.forEach((_, name) => canonical.set(name.toLowerCase(), name));
+  state.tags.forEach(tg => { if (!canonical.has(tg.name.toLowerCase())) canonical.set(tg.name.toLowerCase(), tg.name); });
+  // Сопоставить нижний регистр с реальным именем тэга (или вернуть как есть).
+  const resolve = (low) => canonical.get(low) || low;
+  inc.forEach(low => activeNames.push({ name: resolve(low), kind: 'on' }));
+  exc.forEach(low => activeNames.push({ name: resolve(low), kind: 'excl' }));
+  activeNames.forEach(({ name, kind }) => {
+    const key = name.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    ordered.push({ name, count: counts.get(canonical.get(key)) || 0, kind });
+  });
+  [...counts.keys()].sort((a, b) => a.localeCompare(b, LOCALE)).forEach(name => {
+    if (seen.has(name.toLowerCase())) return;
+    seen.add(name.toLowerCase());
+    ordered.push({ name, count: counts.get(name) || 0, kind: 'none' });
+  });
+
+  body.innerHTML = '';
+  ordered.forEach(({ name, count, kind }) => {
+    const el = document.createElement('span');
+    el.className = 'facet' + (kind === 'on' ? ' on' : (kind === 'excl' ? ' excl' : ''));
+    el.setAttribute('data-tag', name);
+    el.setAttribute('role', 'button');
+    el.tabIndex = 0;
+    // Имя тэга
+    const nm = document.createElement('span'); nm.className = 'fname'; nm.textContent = name;
+    el.appendChild(nm);
+    // Число — количество заметок с этим тэгом в текущем сочетании фильтров.
+    const c = document.createElement('span'); c.className = 'cnt'; c.textContent = count;
+    el.appendChild(c);
+    const hint = count + ' заметок' + (kind === 'excl' ? ' (исключён)' : '');
+    el.title = nm.textContent + ' — ' + hint + '\nКлик — включить/снять; Shift+клик — исключить';
+    el.onclick = (e) => {
+      e.stopPropagation();
+      cycleFacet(name, e.shiftKey || e.altKey);
+    };
+    el.onkeydown = (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); cycleFacet(name, e.shiftKey || e.altKey); }
+    };
+    el.oncontextmenu = (e) => { e.preventDefault(); e.stopPropagation(); cycleFacet(name, true); };
+    body.appendChild(el);
+  });
+  if (ordered.length === 0) {
+    const em = document.createElement('span'); em.style.color = 'var(--muted)'; em.style.fontSize = '12px';
+    em.textContent = activeCount ? 'Нет доступных тэгов в этом сочетании' : 'Нет тэгов';
+    body.appendChild(em);
+  }
+}
+// Сброс всех фильтров: полностью очищает поле поиска (и тэги, и текст).
+function resetFacets() {
+  document.getElementById('search').value = '';
+  onSearch('');
+}
+// Переключение фасета:
+//   обычный клик — включить/снять тэг (toggle include);
+//   Shift/Alt/правый клик — исключить тэг (-тэг) / вернуть из исключения.
+function cycleFacet(tag, exclude) {
+  const low = tag.toLowerCase();
+  const q = getParsedQuery();
+  const isInc = q.includeTags.includes(low);
+  const isExc = q.excludeTags.includes(low);
+  // Оставляем остальные токены, но восстанавливаем корректные кавычки для
+  // имён с пробелами (иначе при join они снова развалятся на несколько слов).
+  const toks = [];
+  tokenizeQuery(searchQuery).forEach(tok => {
+    const m = tok.match(/^([#\-!]*)([\s\S]*)$/);
+    const prefix = m ? m[1] : '';
+    const body = (m ? m[2] : tok).toLowerCase();
+    // выбрасываем только совпавший ТЭГ-токен; свободный текст не трогаем,
+    // даже если он совпадает с именем тэга
+    if (!body || (prefix && body === low)) return;
+    if (prefix) toks.push(tagToken((m ? m[2] : tok), prefix)); // пере-экранируем тэг
+    else toks.push(tok); // свободный текст оставляем как есть
+  });
+  if (exclude || isExc) {
+    if (!isExc) toks.push(tagToken(tag, '-'));
+  } else {
+    if (!isInc) toks.push(tagToken(tag, '#'));
+  }
+  const q2 = toks.join(' ').trim();
+  document.getElementById('search').value = q2;
+  onSearch(q2);
+}
+// Переключить видимость панели фасетов.
+function toggleFacets() {
+  document.getElementById('facets').classList.toggle('open');
+  renderFacets();
+}
+// ---------- Сохранённые представления (именованные фильтры) ----------
+const VIEWS_KEY = 'noteTreeViews';
+function loadViews() {
+  try { const a = JSON.parse(storageGet(VIEWS_KEY) || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; }
+}
+function saveViews(list) { storageSet(VIEWS_KEY, JSON.stringify(list)); }
+// Сохранить текущий запрос как представление.
+function addView(name, query) {
+  const q = String(query || '').trim();
+  if (!q) { notify('⚠️ Сначала задайте фильтр'); return; }
+  const list = loadViews();
+  const nm = String(name || '').trim() || q;
+  const existing = list.find(v => v.name === nm);
+  if (existing) existing.query = q; else list.push({ name: nm, query: q });
+  saveViews(list);
+  renderViews();
+  notify('💾 Представление сохранено: ' + nm);
+}
+function deleteView(name) {
+  saveViews(loadViews().filter(v => v.name !== name));
+  renderViews();
+}
+function applyView(query) {
+  document.getElementById('search').value = query;
+  onSearch(query);
+}
+function renderViews() {
+  const list = document.getElementById('viewsList');
+  if (!list) return;
+  list.innerHTML = '';
+  loadViews().forEach(v => {
+    const row = document.createElement('div');
+    row.className = 'view-item';
+    const nm = document.createElement('span'); nm.className = 'vn'; nm.textContent = v.name;
+    const q = document.createElement('span'); q.className = 'vq'; q.textContent = v.query;
+    const x = document.createElement('span'); x.className = 'vx'; x.textContent = '✕'; x.title = 'Удалить представление';
+    x.onclick = (e) => { e.stopPropagation(); deleteView(v.name); };
+    row.appendChild(nm); row.appendChild(q); row.appendChild(x);
+    row.onclick = () => applyView(v.query);
+    list.appendChild(row);
+  });
+}
+// Диалог сохранения представления.
+async function promptSaveView() {
+  const name = await dialogPrompt('Название представления:', searchQuery || '');
+  if (name) addView(String(name), searchQuery);
+}
+
+// ---------- Theme ----------
+function toggleTheme() {
+  state.theme = state.theme === 'dark' ? 'light' : 'dark';
+  applyTheme();
+  saveTheme();
+}
+function applyTheme() {
+  document.documentElement.setAttribute('data-theme', state.theme);
+  const btn = document.getElementById('themeBtn');
+  if (btn) btn.textContent = state.theme === 'dark' ? '☀️' : '🌙';
+}
+
+// ---------- File System Access API (локальный файл) ----------
+// Хранит дескриптор привязанного локального файла для автосохранения.
+let fileHandle = null;
+// Ключ в IndexedDB/localStorage для восстановления привязки файла после перезагрузки.
+const FILE_HANDLE_DB = 'noteTreeFileHandle';
+const FILE_NAME_KEY = 'noteTreeFileName';
+let hasRestoredHandle = false;
+
+// Сохранить дескриптор привязанного файла в IndexedDB (умеет сериализовать handle).
+// Позволяет восстановить привязку после перезагрузки в поддерживающих браузерах.
+function persistFileHandle(handle) {
+  try {
+    if (typeof indexedDB === 'undefined') return;
+    const req = indexedDB.open(FILE_HANDLE_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('handles');
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = db.transaction('handles', 'readwrite');
+      tx.objectStore('handles').put(handle, 'main');
+      tx.oncomplete = () => db.close();
+    };
+  } catch (e) { /* IndexedDB недоступен — привязка не переживёт перезагрузку */ }
+}
+// Достать ранее сохранённый дескриптор из IndexedDB.
+function loadStoredFileHandle() {
+  return new Promise((resolve) => {
+    try {
+      if (typeof indexedDB === 'undefined') return resolve(null);
+      const req = indexedDB.open(FILE_HANDLE_DB, 1);
+      req.onupgradeneeded = () => req.result.createObjectStore('handles');
+      req.onerror = () => resolve(null);
+      req.onsuccess = () => {
+        const db = req.result;
+        const get = db.transaction('handles', 'readonly').objectStore('handles').get('main');
+        get.onerror = () => resolve(null);
+        get.onsuccess = () => {
+          db.close();
+          resolve(get.result || null);
+        };
+      };
+    } catch (e) { resolve(null); }
+  });
+}
+
+// Сериализация всех данных в единый JSON (для файла и экспорта).
+// version 2: поле "tags" — таблица тэгов, заметки хранят tagIds.
+// Поле "backup" хранит предыдущее полное состояние (для восстановления).
+let lastSavedState = null;
+let lastFileWriteTs = 0;    // время последней записи в файл
+let lastWrittenSize = -1;   // размер последней записи в БАЙТАХ (для сверки с file.size)
+// Длина строки в байтах UTF-8 (Blob), с фолбэком на длину строки.
+function byteLength(str) {
+  try { return new Blob([str]).size; } catch (e) { return String(str).length; }
+}
+// Проверить, не изменился ли привязанный файл извне с момента последней записи.
+// Возвращает true, если обнаружен конфликт (файл изменён другим процессом).
+async function checkFileConflict() {
+  if (!fileHandle) return false;
+  try {
+    const file = await fileHandle.getFile();
+    // Файл обновлён позже нашей записи и размер отличается — вероятно, изменён извне.
+    if (lastFileWriteTs && file.lastModified > lastFileWriteTs + 1000 && file.size !== lastWrittenSize) {
+      const ok = await dialogConfirm('Файл данных был изменён вне приложения. Перечитать его (заменит текущие данные)? Ваш вариант можно восстановить через «🕘 Версии данных».');
+      if (ok) { await readFromFile(); return false; }
+      return true;
+    }
+  } catch (e) { /* файл недоступен — игнорируем */ }
+  return false;
+}
+function serializeData() {
+  return {
+    app: 'note-tree',
+    version: 2,
+    exported: new Date().toISOString(),
+    tags: state.tags,
+    notes: state.notes,
+    backup: lastSavedState
+  };
+}
+// Выбор локального файла для автосохранения (File System Access API).
+// Если API недоступно (корпоративный браузер/политика) — через обычное скачивание.
+async function chooseFile() {
+  if (typeof window.showSaveFilePicker === 'function') {
+    try {
+      fileHandle = await window.showSaveFilePicker({
+        suggestedName: 'заметки-дерево.json',
+        types: [{ description: 'JSON', accept: { 'application/json': ['.json'] } }]
+      });
+      destroyFileHandle();
+      persistFileHandle(fileHandle);
+      storageSet(FILE_NAME_KEY, fileHandle.name || '');
+      saveToFile();
+      notify('💾 Файл привязан — теперь изменения сохраняются в него автоматически');
+      return;
+    } catch (err) {
+      // Пользователь отменил выбор или API не сработал
+      if (err && err.name === 'AbortError') { return; }
+    }
+  }
+  // Фолбэк: File System Access API недоступен — просто скачиваем файл.
+  notify('⚠️ Файловый API недоступно — используйте «⬇️ Экспорт» для сохранения');
+  exportData();
+}
+// Автосохранение в привязанный локальный файл.
+async function saveToFile() {
+  if (!fileHandle) return;
+  try {
+    const payload = JSON.stringify(serializeData(), null, 2);
+    const writable = await fileHandle.createWritable();
+    await writable.write(payload);
+    await writable.close();
+    // Метка последней записи — для обнаружения внешних изменений файла.
+    lastFileWriteTs = Date.now();
+    lastWrittenSize = byteLength(payload);
+    // Запоминаем только что сохранённое состояние как резервное для следующего раза.
+    // Глубокое клонирование, чтобы последующие мутации state не меняли снимок.
+    lastSavedState = {
+      tags: state.tags.map(t => ({ ...t })),
+      notes: state.notes.map(n => ({
+        ...n,
+        tagIds: n.tagIds ? n.tagIds.slice() : [],
+        history: Array.isArray(n.history) ? n.history.map(h => ({ ...h })) : []
+      }))
+    };
+  } catch (err) {
+    const msg = err && err.message ? String(err.message) : '';
+    // Файл мог быть перемещён/удалён/потеряно разрешение — привязка недействительна.
+    const detached = /NotAllowedError|NotFoundError|Failed to execute|createWritable|permission/i.test(msg);
+    if (detached) {
+      fileHandle = null;
+      destroyFileHandle();
+      notify('⚠️ Файл недоступен (перемещён/удалён). Привяжите файл заново.');
+      const ok = await dialogConfirm('Файл данных недоступен. Перепривязать файл?');
+      if (ok) chooseFile();
+    } else {
+      notify('⚠️ Не удалось сохранить в файл: ' + msg);
+    }
+  }
+}
+// Сбросить навигацию/поиск/свёрнутость и состояние редактора.
+// Используется после полной замены данных (импорт, восстановление, чтение из файла).
+function resetNavigation() {
+  currentPath = [];
+  searchQuery = '';
+  collapsed = new Set();
+  editingId = null;
+  selectedId = null;
+  viewingId = null;
+  currentTags = [];
+  const s = document.getElementById('search');
+  if (s) s.value = '';
+  saveCollapsed();
+}
+
+// Размер в человекочитаемом виде (для диагностики).
+function fmtSize(bytes) {
+  if (!bytes || bytes < 0) return '0 КБ';
+  const mb = bytes / 1048576;
+  if (mb >= 1024) return (mb / 1024).toFixed(1) + ' ГБ';
+  if (mb >= 1) return mb.toFixed(1) + ' МБ';
+  return Math.max(1, Math.round(bytes / 1024)) + ' КБ';
+}
+// Диагностика хранилища: доступно ли localStorage, используется ли IndexedDB,
+// режим file://, где лежат данные.
+function storageProbe() {
+  const isFile = (typeof location !== 'undefined') && location.protocol === 'file:';
+  let lsOk = false, lsErr = '';
+  try {
+    if (typeof localStorage !== 'undefined') {
+      const probe = '__nt_probe__';
+      localStorage.setItem(probe, '1');
+      localStorage.removeItem(probe);
+      lsOk = true;
+    } else { lsErr = 'localStorage отсутствует'; }
+  } catch (e) { lsErr = (e && e.message) ? e.message : String(e); }
+  // Тяжёлые ключи читаем через storageGet: они могут лежать в IndexedDB.
+  let savedCount = 0, backupCount = 0;
+  const raw = storageGet(LS_KEY);
+  if (raw) {
+    try {
+      const d = JSON.parse(raw);
+      savedCount = Array.isArray(d) ? d.length : (d && Array.isArray(d.notes) ? d.notes.length : 0);
+    } catch (e) { savedCount = -1; } // невалидный JSON
+  }
+  const braw = storageGet(LS_KEY + '_backup');
+  if (braw) {
+    try {
+      const b = JSON.parse(braw);
+      backupCount = b && Array.isArray(b.notes) ? b.notes.length : 0;
+    } catch (e) { backupCount = -1; }
+  }
+  const hasHandle = !!fileHandle;
+  const fname = storageGet(FILE_NAME_KEY) || '';
+  return { isFile, lsOk, lsErr, savedCount, backupCount, hasHandle, fname, inMemory: state.notes.length, idbMode, idbError };
+}
+// Показать отчёт о состоянии хранилища в модальном окне (без консоли браузера).
+async function showDiagnostics() {
+  const p = storageProbe();
+  const lines = [];
+  lines.push('Режим открытия: ' + (p.isFile ? 'file:// (двойной клик по файлу)' : (location.protocol + '//' + location.host)));
+  lines.push('localStorage: ' + (p.lsOk ? 'доступен ✅' : 'НЕдоступен ❌' + (p.lsErr ? ' (' + p.lsErr + ')' : '')));
+  lines.push('База данных: ' + (p.idbMode
+    ? 'IndexedDB ✅ — заметки, снимки и корзина хранятся здесь'
+    : 'IndexedDB не используется ❌' + (p.idbError ? ' (' + p.idbError + ')' : ' — данные в localStorage')));
+  // Квота браузера: работает и на file://.
+  try {
+    if (navigator.storage && navigator.storage.estimate) {
+      const est = await navigator.storage.estimate();
+      if (est && est.quota) lines.push('Занято в браузере: ' + fmtSize(est.usage) + ' из ' + fmtSize(est.quota));
+    }
+  } catch (e) { /* квота недоступна — не критично */ }
+  lines.push('Сохранено в браузере: ' + (p.savedCount === -1 ? 'данные повреждены' : p.savedCount + ' заметок'));
+  lines.push('Резервная копия в браузере: ' + (p.backupCount === -1 ? 'повреждена' : p.backupCount + ' заметок'));
+  lines.push('Привязанный файл: ' + (p.hasHandle ? 'да' + (p.fname ? ' (' + p.fname + ')' : '') : 'нет'));
+  lines.push('Заметок в текущей сессии: ' + p.inMemory);
+  lines.push('');
+  if (p.isFile) {
+    lines.push('Вы открыли файл двойным кликом (file://). Данные хранятся в');
+    lines.push('профиле браузера и привязаны к папке с этим файлом: перенос HTML');
+    lines.push('в другую папку или другой браузер их не увидит.');
+    if (!p.idbMode) {
+      lines.push('IndexedDB недоступна, поэтому при блокировке localStorage');
+      lines.push('данные могут не пережить перезагрузку.');
+    }
+    lines.push('Для переноса используйте экспорт JSON или привязку файла.');
+    lines.push('');
+  }
+  if (p.idbMode && p.savedCount > 0) {
+    lines.push('✅ В базе браузера сохранено ' + p.savedCount + ' заметок.');
+  } else if (p.savedCount > 0) {
+    lines.push('✅ В браузере сохранено ' + p.savedCount + ' заметок.');
+  } else if (p.savedCount === 0) {
+    lines.push('📭 В браузере нет сохранённых заметок (пусто).');
+    lines.push('Если раньше заметки были — их можно найти в привязанном файле или резервной копии.');
+  }
+  await dialogShow({ title: 'Состояние хранилища', message: lines.join('\n'), input: false });
+}
+
+// Меню восстановления: версионные снимки + резервная копия файла/браузера.
+async function snapshotMenu() {
+  const list = loadSnapshots();
+  const items = [];
+  if (list.length === 0) {
+    items.push({ label: 'Снимков пока нет', run: () => {} });
+  } else {
+    list.slice(0, SNAPSHOT_MAX).forEach((s, i) => {
+      const d = new Date(s.ts).toLocaleString(LOCALE_DT, { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+      items.push({ label: '↩ ' + d + ' — ' + s.count + ' замет.', run: async () => {
+        const ok = await dialogConfirm('Восстановить состояние на ' + d + ' (' + s.count + ' заметок)? Текущие данные будут заменены.');
+        if (ok) restoreSnapshot(i);
+      } });
+    });
+  }
+  items.push('-');
+  items.push({ label: '🗑 Корзина (' + loadTrash().length + ')', run: () => trashMenu() });
+  items.push({ label: '♻️ Резервная копия (файл/браузер)', run: () => restoreFromBackup() });
+  const btn = document.getElementById('backupBtn');
+  const rect = btn.getBoundingClientRect();
+  showCtxMenu(rect.left, rect.bottom + 4, items);
+}
+// Восстановить ранее сохранённую резервную копию (полное состояние из "backup" файла).
+async function restoreFromBackup() {
+  if (!fileHandle) {
+    // Нет привязанного файла — пробуем бэкап из localStorage (снимок при загрузке).
+    let backup = null;
+    try {
+      const raw = storageGet(LS_KEY + '_backup');
+      if (raw) { const b = JSON.parse(raw); if (b && Array.isArray(b.notes)) backup = b; }
+    } catch (e) { backup = null; }
+    if (!backup) { notify('⚠️ Резервная копия не найдена'); return false; }
+    const ok = await dialogConfirm('Восстановить ' + backup.notes.length + ' заметок из резервной копии браузера?');
+    if (!ok) return false;
+    state.notes = applyData({ tags: backup.tags || [], notes: backup.notes });
+    resetNavigation();
+    saveState();
+    saveToFile();
+    renderAll();
+    notify('♻️ Восстановлено из резервной копии: ' + state.notes.length + ' заметок');
+    return true;
+  }
+  try {
+    const file = await fileHandle.getFile();
+    const data = JSON.parse(await file.text());
+    const backup = data && data.backup && Array.isArray(data.backup.notes) ? data.backup : null;
+    if (!backup) { notify('⚠️ Резервная копия не найдена'); return false; }
+    state.notes = applyData({ tags: backup.tags || [], notes: backup.notes });
+    resetNavigation();
+    saveState();
+    saveToFile();
+    renderAll();
+    notify('♻️ Восстановлено из резервной копии: ' + state.notes.length + ' заметок');
+    return true;
+  } catch (e) { notify('⚠️ Не удалось восстановить резервную копию'); return false; }
+}
+// ---------- Управление тэгами (через таблицу) ----------
+// Переименовать тэг во всех заметках одним изменением таблицы.
+function renameTag(oldName, newName) {
+  const clean = String(newName || '').trim();
+  if (!clean) { notify('⚠️ Новое имя пустое'); return; }
+  const t = getTagByName(oldName);
+  if (!t) { notify('⚠️ Тэг не найден'); return; }
+  // проверка на дубль имени
+  if (state.tags.some(x => x.id !== t.id && x.name.toLowerCase() === clean.toLowerCase())) {
+    notify('⚠️ Тэг с таким именем уже существует'); return;
+  }
+  t.name = clean;
+  rebuildTagIndex();
+  invalidateTree();
+  // пути и свёрнутость построены по именам — пересчитать под новое имя
+  currentPath = currentPath.map(p => (sameName(p, oldName) ? clean : p));
+  const newCollapsed = new Set();
+  collapsed.forEach(k => newCollapsed.add(k.split('/').map(seg => (sameName(seg, oldName) ? clean : seg)).join('/')));
+  collapsed = newCollapsed;
+  saveCollapsed();
+  saveState();
+  saveToFile();
+  renderAll();
+  notify('✏️ Тэг переименован: ' + oldName + ' → ' + clean);
+}
+// Удалить тэг во всех заметках (убирает из таблицы; заметки автоматически отцепляются).
+async function deleteTag(name) {
+  const ok = await dialogConfirm('Удалить тэг «' + name + '» из всех заметок?');
+  if (!ok) return;
+  prepareUndo('удаление тэга');
+  state.tags = state.tags.filter(x => x.name.toLowerCase() !== name.toLowerCase());
+  rebuildTagIndex();
+  invalidateTree();
+  // очищаем tagIds заметок от ссылок на удалённый тэг
+  state.notes.forEach(n => { n.tagIds = pruneTagIds((n.tagIds || [])); });
+  currentPath = currentPath.filter(p => !sameName(p, name));
+  const newCollapsed = new Set();
+  collapsed.forEach(k => {
+    const segs = k.split('/');
+    if (!segs.some(seg => sameName(seg, name))) newCollapsed.add(k);
+  });
+  collapsed = newCollapsed;
+  saveCollapsed();
+  saveState();
+  saveToFile();
+  renderAll();
+  notify('🗑️ Тэг удалён: ' + name);
+}
+// Задать цвет тэга (через таблицу). Пустая строка — сбросить.
+function setTagColor(name, color) {
+  const t = getTagByName(name);
+  if (!t) return;
+  if (color) t.color = color; else delete t.color;
+  rebuildTagIndex(); // обновить карту цветов (дерево перекрашивается без пересборки)
+  saveState();
+  saveToFile();
+  renderAll();
+  notify('🎨 Цвет тэга обновлён: ' + name);
+}
+// Слить тэг «fromName» в «intoName»: переносим ссылки tagIds на целевой тэг,
+// удаляем исходный из таблицы и всех заметок. Цвет целевого сохраняется.
+function mergeTags(fromName, intoName) {
+  const src = getTagByName(fromName);
+  const dst = getTagByName(intoName);
+  if (!src || !dst) { notify('⚠️ Тэг не найден'); return false; }
+  if (src.id === dst.id) return false;
+  prepareUndo('слияние тэгов');
+  // переносим ссылки на исходный тэг на целевой
+  state.notes.forEach(n => {
+    if (!Array.isArray(n.tagIds)) { n.tagIds = []; return; }
+    let changed = false;
+    const out = [];
+    n.tagIds.forEach(id => {
+      if (id === src.id) { if (!out.includes(dst.id)) out.push(dst.id); changed = true; }
+      else if (!out.includes(id)) out.push(id);
+    });
+    if (changed) n.tagIds = out;
+  });
+  // удаляем исходный тэг из таблицы
+  state.tags = state.tags.filter(x => x.id !== src.id);
+  rebuildTagIndex();
+  invalidateTree();
+  // обновляем навигацию/свёрнутость: имя исходного тэга в пути заменяем на целевое
+  currentPath = currentPath.map(p => (sameName(p, fromName) ? intoName : p));
+  const newCollapsed = new Set();
+  collapsed.forEach(k => newCollapsed.add(k.split('/').map(seg => (sameName(seg, fromName) ? intoName : seg)).join('/')));
+  collapsed = newCollapsed;
+  saveCollapsed();
+  saveState();
+  saveToFile();
+  renderAll();
+  notify('🔗 Тэг «' + fromName + '» слит в «' + intoName + '»');
+  return true;
+}
+
+// ---------- Менеджер тэгов (список всех тэгов с действиями) ----------
+function openTagManager() {
+  document.getElementById('tagManagerMask').classList.add('show');
+  const s = document.getElementById('tmSearch');
+  if (s) s.value = '';
+  const n = document.getElementById('tmNotice');
+  if (n) { n.style.display = 'none'; n.textContent = ''; }
+  renderTagManager();
+}
+function closeTagManager() {
+  document.getElementById('tagManagerMask').classList.remove('show');
+}
+// Отрисовать список тэгов: имя, счётчик заметок, цвет и действия.
+function renderTagManager() {
+  const list = document.getElementById('tmList');
+  const summary = document.getElementById('tmSummary');
+  if (!list) return;
+  const q = (document.getElementById('tmSearch') ? document.getElementById('tmSearch').value : '').trim().toLowerCase();
+  const tags = state.tags
+    .filter(t => t && typeof t.name === 'string')
+    .filter(t => !q || t.name.toLowerCase().includes(q))
+    .sort((a, b) => a.name.localeCompare(b.name, LOCALE));
+  list.innerHTML = '';
+  if (tags.length === 0) {
+    const e = document.createElement('div');
+    e.className = 'tm-empty';
+    e.textContent = state.tags.length === 0 ? 'Тэгов пока нет' : 'Ничего не найдено';
+    list.appendChild(e);
+  }
+  tags.forEach(t => {
+    const row = document.createElement('div');
+    const count = tagCount(t.name);
+    row.className = 'tm-row' + (count === 0 ? ' orphan' : '');
+    row.dataset.tagName = t.name;
+    const dot = document.createElement('span');
+    dot.className = 'tm-dot';
+    dot.style.background = t.color || 'transparent';
+    const nameEl = document.createElement('span');
+    nameEl.className = 'tm-name';
+    nameEl.textContent = t.name;
+    const cnt = document.createElement('span');
+    cnt.className = 'tm-count';
+    cnt.textContent = count === 0 ? 'пусто' : count + ' замет.';
+    const actions = document.createElement('span');
+    actions.className = 'tm-actions';
+    const mkBtn = (label, title, cls, fn) => {
+      const b = document.createElement('button');
+      b.className = 'tm-act' + (cls ? ' ' + cls : '');
+      b.textContent = label; b.title = title;
+      b.onclick = (e) => { e.stopPropagation(); fn(); };
+      return b;
+    };
+    actions.appendChild(mkBtn('🎨', 'Цвет', '', () => tagManagerColor(t.name)));
+    actions.appendChild(mkBtn('✏️', 'Переименовать', '', () => tagManagerRename(t.name)));
+    actions.appendChild(mkBtn('🔗', 'Слить с другим тэгом', '', () => tagManagerMerge(t.name)));
+    actions.appendChild(mkBtn('🗑️', 'Удалить', 'danger', () => tagManagerDelete(t.name)));
+    row.appendChild(dot); row.appendChild(nameEl); row.appendChild(cnt); row.appendChild(actions);
+    list.appendChild(row);
+  });
+  if (summary) {
+    const total = state.tags.length;
+    const shown = tags.length;
+    summary.textContent = q ? shown + ' из ' + total + ' тэгов' : total + ' тэгов';
+  }
+}
+// Сменить цвет тэга из менеджера (встроенная палитра).
+function tagManagerColor(name) {
+  const row = [...document.querySelectorAll('#tmList .tm-row')].find(r => r.querySelector('.tm-name') && r.querySelector('.tm-name').textContent === name);
+  if (!row) return;
+  const existing = row.nextElementSibling;
+  if (existing && existing.classList.contains('tm-colors')) { existing.remove(); return; }
+  const palette = document.createElement('div');
+  palette.className = 'tm-colors';
+  TAG_COLORS.forEach(c => {
+    const sw = document.createElement('span');
+    sw.className = 'tm-color';
+    sw.style.background = c;
+    sw.title = c;
+    sw.onclick = (e) => { e.stopPropagation(); setTagColor(name, c); renderTagManager(); };
+    palette.appendChild(sw);
+  });
+  const reset = document.createElement('span');
+  reset.className = 'tm-color';
+  reset.style.background = 'transparent';
+  reset.title = 'Сбросить';
+  reset.textContent = '✕';
+  reset.style.textAlign = 'center';
+  reset.onclick = (e) => { e.stopPropagation(); setTagColor(name, ''); renderTagManager(); };
+  palette.appendChild(reset);
+  row.after(palette);
+}
+// Переименовать тэг из менеджера.
+async function tagManagerRename(name) {
+  const nn = await dialogPrompt('Новое имя тэга «' + name + '»:', name);
+  if (nn != null && String(nn).trim() && String(nn).trim() !== name) {
+    renameTag(name, String(nn).trim());
+    renderTagManager();
+  }
+}
+// Слить тэг с другим: выбираем целевой из списка.
+async function tagManagerMerge(fromName) {
+  const others = state.tags.filter(t => t.name !== fromName).sort((a, b) => a.name.localeCompare(b.name, LOCALE));
+  if (others.length === 0) { notify('⚠️ Нет других тэгов для слияния'); return; }
+  const target = await dialogPrompt('Слить «' + fromName + '» в тэг (доступные: ' + others.slice(0, 10).map(t => t.name).join(', ') + (others.length > 10 ? '…' : '') + ')', others[0].name);
+  if (target == null) return;
+  const tgt = String(target).trim();
+  if (!tgt) return;
+  if (!getTagByName(tgt)) { notify('⚠️ Тэг «' + tgt + '» не найден'); return; }
+  const ok = await dialogConfirm('Слить «' + fromName + '» в «' + tgt + '»? Заметки получат тэг «' + tgt + '».');
+  if (!ok) return;
+  if (mergeTags(fromName, tgt)) renderTagManager();
+}
+// Удалить тэг из менеджера (с подтверждением).
+async function tagManagerDelete(name) {
+  await deleteTag(name);
+  renderTagManager();
+}
+// Удалить все тэги, не используемые ни в одной заметке («сироты»).
+async function removeOrphanTags() {
+  const orphans = state.tags.filter(t => tagCount(t.name) === 0);
+  if (orphans.length === 0) { notify('✅ Пустых тэгов нет'); return 0; }
+  const ok = await dialogConfirm('Удалить ' + orphans.length + ' тэг(ов) без заметок?');
+  if (!ok) return 0;
+  prepareUndo('удаление пустых тэгов');
+  const names = orphans.map(t => t.name.toLowerCase());
+  state.tags = state.tags.filter(t => !names.includes(t.name.toLowerCase()));
+  rebuildTagIndex();
+  invalidateTree();
+  state.notes.forEach(n => { n.tagIds = pruneTagIds(n.tagIds || []); });
+  currentPath = currentPath.filter(p => !names.includes(p.toLowerCase()));
+  saveCollapsed();
+  saveState();
+  saveToFile();
+  renderAll();
+  renderTagManager();
+  notify('🧹 Удалено пустых тэгов: ' + orphans.length);
+  return orphans.length;
+}
+// Найти группы похожих имён тэгов (расстояние Левенштейна <= порога или вложенность).
+function findSimilarTagNames(names) {
+  const norm = s => String(s).toLowerCase().replace(/[\s_\-]+/g, '');
+  const lev = (a, b) => {
+    const m = a.length, n = b.length;
+    if (!m) return n; if (!n) return m;
+    let prev = Array.from({ length: n + 1 }, (_, j) => j);
+    for (let i = 1; i <= m; i++) {
+      const cur = [i];
+      for (let j = 1; j <= n; j++) {
+        cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      }
+      prev = cur;
+    }
+    return prev[n];
+  };
+  const groups = [];
+  const used = new Set();
+  for (let i = 0; i < names.length; i++) {
+    if (used.has(i)) continue;
+    const base = norm(names[i]);
+    const group = [names[i]];
+    for (let j = i + 1; j < names.length; j++) {
+      if (used.has(j)) continue;
+      const other = norm(names[j]);
+      const dist = lev(base, other);
+      const maxLen = Math.max(base.length, other.length) || 1;
+      const similar = (dist <= 2 && dist < maxLen) || base.includes(other) || other.includes(base);
+      if (similar) { group.push(names[j]); used.add(j); }
+    }
+    if (group.length > 1) { used.add(i); groups.push(group); }
+  }
+  return groups;
+}
+// Подсветить в менеджере похожие имена и показать подсказку.
+function highlightSimilarTags() {
+  const names = state.tags.map(t => t.name);
+  const groups = findSimilarTagNames(names);
+  renderTagManager();
+  const notice = document.getElementById('tmNotice');
+  if (groups.length === 0) {
+    if (notice) { notice.style.display = 'block'; notice.textContent = '✅ Похожих имён не найдено.'; }
+    return 0;
+  }
+  const similarSet = new Set(groups.flat());
+  [...document.querySelectorAll('#tmList .tm-row')].forEach(row => {
+    const nm = row.querySelector('.tm-name');
+    if (nm && similarSet.has(nm.textContent)) row.classList.add('similar');
+  });
+  if (notice) {
+    notice.style.display = 'block';
+    notice.textContent = '🔍 Похожие имена: ' + groups.map(g => g.join(' ≈ ')).join('; ');
+  }
+  return groups.length;
+}
+
+// ---------- Контекстное меню (правый клик) ----------
+let lastCtxPos = { x: 20, y: 20 }; // последняя позиция меню (для подменю после закрытия)
+function closeCtxMenu() {
+  const el = document.getElementById('ctxMenu');
+  el.classList.remove('show');
+  el.innerHTML = '';
+}
+function showCtxMenu(x, y, items) {
+  const el = document.getElementById('ctxMenu');
+  lastCtxPos = { x: x, y: y };
+  el.innerHTML = '';
+  el.setAttribute('role', 'menu');
+  // Безопасный запуск пункта: не даём async-обработчику уронить приложение
+  // необработанным reject-ом.
+  const runItem = (fn) => {
+    try {
+      const r = fn();
+      if (r && typeof r.catch === 'function') r.catch(err => notify('⚠️ ' + (err && err.message ? err.message : err)));
+    } catch (err) {
+      notify('⚠️ ' + (err && err.message ? err.message : err));
+    }
+  };
+  items.forEach(item => {
+    if (item === '-') { const s = document.createElement('div'); s.className = 'ctx-sep'; el.appendChild(s); return; }
+    const d = document.createElement('div');
+    d.className = 'ctx-item' + (item.danger ? ' danger' : '');
+    d.textContent = item.label;
+    d.setAttribute('role', 'menuitem');
+    d.tabIndex = 0;
+    if (item.color) d.style.color = item.color;
+    d.onclick = (ev) => { ev.stopPropagation(); closeCtxMenu(); runItem(item.run); };
+    d.onkeydown = (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); d.click(); } };
+    el.appendChild(d);
+  });
+  el.classList.add('show');
+  // позиционируем, чтобы не вылезать за экран
+  const w = el.offsetWidth, h = el.offsetHeight;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  el.style.left = Math.min(x, vw - w - 8) + 'px';
+  el.style.top = Math.min(y, vh - h - 8) + 'px';
+}
+// Открыть «подменю» рядом с текущим меню (для вложенных списков).
+// Родительское меню закрывается перед вызовом run(), поэтому если оно уже скрыто,
+// берём последнюю известную позицию — иначе подменю прыгало бы в угол (0,0).
+function submenuFor(items) {
+  const el = document.getElementById('ctxMenu');
+  let x = lastCtxPos.x + 16, y = lastCtxPos.y + 16;
+  if (el.classList.contains('show')) {
+    const rect = el.getBoundingClientRect();
+    x = rect.left; y = rect.bottom;
+  }
+  showCtxMenu(x, y, items);
+}
+// Создать новую заметку в выбранной ветке.
+function menuCreateNoteHere(path) {
+  currentPath = path;
+  renderAll();
+  openEditor();
+}
+// Переименовать тэг с вводом нового имени.
+async function menuRenameTag(oldName) {
+  const newName = await dialogPrompt('Новое имя тэга «' + oldName + '»:', oldName);
+  if (newName != null && String(newName).trim() && String(newName).trim() !== oldName) {
+    renameTag(oldName, String(newName).trim());
+  }
+}
+// Удалить тэг во всех заметках.
+function menuDeleteTag(name) { deleteTag(name); }
+// Пусто ли переданное множество заметок (общая проверка для экспорта/печати).
+function isEmptyList(notes) { return !notes || notes.length === 0; }
+// Экспорт подпапки/папки в Markdown (все заметки в ней).
+function exportMd(notes) {
+  if (isEmptyList(notes)) { notify(NO_NOTES_MSG); return; }
+  const lines = notes.map(n => {
+    const tags = tagsOf(n).map(t => '#' + t).join(' ');
+    return '# ' + (n.title || UNTITLED) + '\n' + tags + '\n\n' + (n.body || '') + '\n\n';
+  });
+  downloadText('# Дерево заметок\n\n' + lines.join('\n'), 'заметки.md');
+}
+function exportTxt(notes) {
+  if (isEmptyList(notes)) { notify(NO_NOTES_MSG); return; }
+  const lines = notes.map(n => {
+    return (n.title || UNTITLED) + '\n' + 'Тэги: ' + tagsOf(n).join(', ') + '\n\n' + (n.body || '') + '\n' + '—'.repeat(30);
+  });
+  downloadText(lines.join('\n'), 'заметки.txt');
+}
+// Печать/PDF набора заметок: заполняем #printArea, печатаем, затем очищаем.
+// Пользователь сохраняет как PDF через диалог печати браузера (без внешних библиотек).
+function printNotes(notes) {
+  if (isEmptyList(notes)) { notify('⚠️ Нет заметок для печати'); return; }
+  const area = document.getElementById('printArea');
+  area.innerHTML = '';
+  sortNotes(notes.slice()).forEach(n => {
+    const wrap = document.createElement('div');
+    wrap.className = 'print-note';
+    const h = document.createElement('h2');
+    h.textContent = n.title || UNTITLED;
+    const tags = document.createElement('div');
+    tags.className = 'print-tags';
+    tags.textContent = tagsOf(n).join(' · ');
+    const body = document.createElement('div');
+    body.className = 'print-body';
+    body.textContent = n.body || '';
+    wrap.appendChild(h); wrap.appendChild(tags); wrap.appendChild(body);
+    area.appendChild(wrap);
+  });
+  const clear = () => { area.innerHTML = ''; };
+  window.addEventListener('afterprint', clear, { once: true });
+  window.print();
+  setTimeout(clear, 1500); // фолбэк, если afterprint не сработал
+}
+function downloadText(text, filename, mime) {
+  const blob = new Blob([text], { type: mime || 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; a.style.display = 'none';
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 1000);
+}
+// Меню для папки (по имени/ветке).
+function folderContextMenu(x, y, path) {
+  const tagName_ = path[path.length - 1];
+  showCtxMenu(x, y, [
+    { label: '📄 Создать заметку здесь', run: () => menuCreateNoteHere(path) },
+    { label: '✏️ Переименовать тэг «' + tagName_ + '»', run: () => menuRenameTag(tagName_) },
+    { label: '🎨 Цвет тэга', run: () => colorMenuFor(tagName_) },
+    { label: '🔗 Слить с другим тэгом…', run: () => tagManagerMerge(tagName_) },
+    { label: '🗑️ Удалить тэг «' + tagName_ + '»', run: () => menuDeleteTag(tagName_), danger: true },
+    '-',
+    { label: '⬇️ Экспорт папки (Markdown)', run: () => exportMd(notesInFolder(path)) },
+    { label: '⬇️ Экспорт папки (TXT)', run: () => exportTxt(notesInFolder(path)) },
+    { label: '🖨️ Печать/PDF папки', run: () => printNotes(notesInFolder(path)) },
+    { label: '📁 Открыть папку', run: () => { currentPath = path; renderAll(); } }
+  ]);
+}
+// Заметки конкретной ветки дерева (по её path), без учёта глобальной currentPath.
+function notesInFolder(path) {
+  return state.notes.filter(n => noteBelongsToPath(n, path));
+}
+// Палитра цветов для тэга.
+const TAG_COLORS = ['#e5484d', '#f2994a', '#e5c100', '#46a758', '#2f9e8f', '#3b82f6', '#8b5cf6', '#ec4899'];
+// Подменю выбора цвета тэга.
+function colorMenuFor(tagName_) {
+  const items = TAG_COLORS.map(c => ({ label: '● ' + c, run: () => setTagColor(tagName_, c), color: c }));
+  items.push({ label: '○ Сбросить цвет', run: () => setTagColor(tagName_, '') });
+  submenuFor(items);
+}
+// Меню для заметки (по id).
+function noteContextMenu(x, y, noteId) {
+  const n = noteById(noteId);
+  if (!n) return;
+  showCtxMenu(x, y, [
+    { label: '✏️ Редактировать', run: () => openEditor(n.id) },
+    { label: (n.pinned ? '📌 Открепить' : '📌 Закрепить'), run: () => togglePin(n.id) },
+    { label: '📁 Переместить в…', run: () => moveMenuFor(n.id) },
+    { label: '📑 Дублировать', run: () => duplicateNote(n.id) },
+    { label: '🕘 История версий', run: () => historyMenuFor(n.id) },
+    '-',
+    { label: '⬇️ Экспорт (Markdown)', run: () => exportMd([n]) },
+    { label: '⬇️ Экспорт (TXT)', run: () => exportTxt([n]) },
+    { label: '🖨️ Печать/PDF', run: () => printNotes([n]) },
+    '-',
+    { label: '🗑️ Удалить', run: () => { editingId = n.id; deleteNote(); }, danger: true }
+  ]);
+}
+// Дублировать заметку (копия с теми же тэгами, история не копируется).
+function duplicateNote(noteId) {
+  const src = noteById(noteId);
+  if (!src) return null;
+  const copy = normalizeNote({
+    id: uid(),
+    title: (src.title || UNTITLED) + ' (копия)',
+    body: src.body || '',
+    tagIds: (src.tagIds || []).slice(),
+    created: Date.now(),
+    updated: Date.now(),
+    pinned: false
+  });
+  state.notes.push(copy);
+  invalidateTree();
+  saveState();
+  saveToFile();
+  renderAll();
+  notify('📑 Заметка продублирована');
+  return copy;
+}
+// Подменю перемещения заметки: список всех тэгов + корень.
+function moveMenuFor(noteId) {
+  const items = [{ label: '🏠 Без тэга (корень)', run: () => moveNoteToTag(noteId, null) }];
+  allTags().forEach(t => items.push({ label: '📁 ' + t, run: () => moveNoteToTag(noteId, t) }));
+  submenuFor(items);
+}
+// Переместить заметку в папку тэга (null — убрать все тэги, в корень).
+function moveNoteToTag(noteId, tag) {
+  const n = noteById(noteId);
+  if (!n) return;
+  if (tag == null) {
+    n.tagIds = [];
+  } else {
+    const id = ensureTag(tag);
+    if (id) { n.tagIds = [id]; } // перемещение = единственный тэг папки
+  }
+  n.updated = Date.now();
+  rebuildTagIndex();
+  invalidateTree();
+  saveState();
+  saveToFile();
+  renderAll(); // навигацию не сбрасываем: пользователь остаётся в текущей папке
+  notify('📁 Заметка перемещена: ' + (tag || 'корень'));
+}
+// Переключить закрепление заметки (одна из первых в списке).
+function togglePin(noteId) {
+  const n = noteById(noteId);
+  if (!n) return;
+  if (n.pinned) delete n.pinned; else n.pinned = true;
+  saveState();
+  saveToFile();
+  renderAll({ tree: false }); // закрепление не меняет состав дерева
+  notify(n.pinned ? '📌 Заметка закреплена' : '📌 Заметка откреплена');
+}
+// Подменю истории версий заметки (до 10 последних снимков).
+function historyMenuFor(noteId) {
+  const n = noteById(noteId);
+  if (!n || !n.history || n.history.length === 0) {
+    notify('🕘 История пуста');
+    return;
+  }
+  const items = n.history.slice(0, 10).map((h, i) => {
+    const d = new Date(h.ts).toLocaleString(LOCALE_DT, { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+    return { label: '↩ ' + d + ': ' + (h.title || UNTITLED).slice(0, 24), run: () => restoreHistory(noteId, i) };
+  });
+  submenuFor(items);
+}
+// Восстановить версию из истории по индексу.
+function restoreHistory(noteId, index) {
+  const n = noteById(noteId);
+  if (!n || !Array.isArray(n.history) || !n.history[index]) return;
+  const ver = n.history[index];
+  pushHistory(n); // сохраняем текущее состояние, чтобы можно было вернуться
+  n.title = ver.title; n.body = ver.body;
+  n.updated = Date.now();
+  invalidateTree();
+  saveState();
+  saveToFile();
+  renderAll();
+  notify('↩ Версия восстановлена');
+}
+// Закрытие меню по клику вне его.
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#ctxMenu')) closeCtxMenu();
+  if (!e.target.closest('.search')) hideSearchSuggest();
+  if (!e.target.closest('.tag-field')) hideTagSuggest();
+});
+document.addEventListener('contextmenu', (e) => {
+  if (!e.target.closest('.node-row') && !e.target.closest('.note-card') && !e.target.closest('.root-note')) closeCtxMenu();
+});
+// Обнаружение внешних изменений привязанного файла при возврате к окну.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && fileHandle) checkFileConflict();
+});
+
+// Снять привязку файла (убрать сохранённый дескриптор).
+function destroyFileHandle() {
+  try {
+    if (typeof indexedDB === 'undefined') return;
+    const req = indexedDB.open(FILE_HANDLE_DB, 1);
+    req.onsuccess = () => {
+      const db = req.result;
+      const tx = db.transaction('handles', 'readwrite');
+      tx.objectStore('handles').delete('main');
+      tx.oncomplete = () => db.close();
+    };
+  } catch (e) {}
+  try { storageSet(FILE_NAME_KEY, ''); } catch (e) {}
+}
+// Прочитать данные из привязанного файла и заменить состояние.
+async function readFromFile() {
+  if (!fileHandle) return false;
+  try {
+    const file = await fileHandle.getFile();
+    const text = await file.text();
+    const data = JSON.parse(text);
+    if (!isValidData(data)) { notify('⚠️ Файл имеет неверный формат'); return false; }
+    state.notes = applyData(data); // применяет таблицу тэгов и миграцию
+    resetNavigation();
+    saveState();
+    renderAll();
+    notify('📂 Данные загружены из файла: ' + state.notes.length + ' заметок');
+    return true;
+  } catch (e) { return false; }
+}
+// Восстановить привязку файла после перезагрузки (если IndexedDB сохранил handle).
+// Если разрешение есть и данных ещё нет — автоматически подгрузить их из файла.
+async function restoreFileHandle() {
+  if (hasRestoredHandle) return;
+  hasRestoredHandle = true;
+  try {
+    const stored = await loadStoredFileHandle();
+    if (!stored) return;
+    let handle = stored;
+    // Проверяем разрешение на чтение; при необходимости запрашиваем.
+    try {
+      if (handle.queryPermission && (await handle.queryPermission({ mode: 'readwrite' })) !== 'granted') {
+        if (handle.requestPermission) {
+          const perm = await handle.requestPermission({ mode: 'readwrite' });
+          if (perm !== 'granted') return;
+        } else return;
+      }
+    } catch (e) { return; }
+    fileHandle = handle;
+    // Если данные ещё пустые (новый браузер/машина) — подгрузить из файла.
+    if (state.notes.length === 0) { await readFromFile(); return; }
+    notify('💾 Привязка файла восстановлена');
+  } catch (e) {}
+}
+
+// ---------- Export / Import ----------
+function exportData() {
+  const payload = JSON.stringify(serializeData(), null, 2);
+  downloadText(payload, 'заметки-дерево.json', JSON_MIME);
+  notify('⬇️ Экспортировано');
+}
+function importData() {
+  document.getElementById('fileInput').click();
+}
+(function () {
+  const fi = document.getElementById('fileInput');
+  fi.addEventListener('change', () => {
+    const file = fi.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onerror = () => { notify('⚠️ Не удалось прочитать файл'); fi.value = ''; };
+    reader.onload = async e => {
+      try {
+        const data = JSON.parse(e.target.result);
+        if (!isValidData(data)) throw new Error('bad format');
+        const count = Array.isArray(data) ? data.length : (data.notes ? data.notes.length : 0);
+        const ok = await dialogConfirm(`Импортировать ${count} записей? Это заменит текущие данные.`);
+        if (!ok) { fi.value = ''; return; }
+        state.notes = applyData(data); // применяет таблицу тэгов и миграцию
+        resetNavigation(); // сброс навигации/поиска/свёрнутости и состояния редактора
+        saveState();
+        saveToFile();
+        renderAll();
+        closeEditor();
+        notify('⬆️ Импортировано: ' + state.notes.length);
+      } catch (err) { notify('⚠️ Ошибка чтения файла'); }
+      fi.value = '';
+    };
+    reader.readAsText(file);
+  });
+})();
+
+// ---------- Mobile ----------
+function toggleSidebar() { document.getElementById('sidebar').classList.toggle('open'); }
+function closeSidebar() { document.getElementById('sidebar').classList.remove('open'); }
+function toggleSidebarIfMobile() {
+  if (window.innerWidth <= 720) closeSidebar();
+}
+// Клик вне сайдбара на мобильных закрывает его.
+document.addEventListener('click', (e) => {
+  const sidebar = document.getElementById('sidebar');
+  if (sidebar.classList.contains('open') && !e.target.closest('#sidebar') && !e.target.closest('#burgerBtn')) closeSidebar();
+});
+// Свайп влево по сайдбару закрывает его (мобильные жест).
+let sideTouchX = null;
+document.addEventListener('touchstart', (e) => {
+  if (document.getElementById('sidebar').classList.contains('open')) {
+    const t = e.changedTouches[0]; if (t) sideTouchX = t.clientX;
+  } else { sideTouchX = null; }
+}, { passive: true });
+document.addEventListener('touchend', (e) => {
+  if (sideTouchX == null) return;
+  const t = e.changedTouches[0]; if (!t) return;
+  if (sideTouchX - t.clientX > 60) { closeSidebar(); sideTouchX = null; }
+}, { passive: true });
+
+// ---------- Универсальный диалог (ввод/подтверждение) ----------
+// Замена браузерных prompt/confirm, которые могут быть заблокированы политиками.
+let dialogResolve = null;
+function dialogShow({ title, message, input = false, label = '', value = '' }) {
+  return new Promise((resolve) => {
+    // Защита от вложенных вызовов: если диалог уже открыт — закрываем предыдущий,
+    // иначе его промис зависнет навсегда (единственный dialogResolve).
+    if (dialogResolve) { const old = dialogResolve; dialogResolve = null; old(false); }
+    dialogResolve = resolve;
+    document.getElementById('dialogTitle').textContent = title;
+    document.getElementById('dialogMsg').textContent = message;
+    const wrap = document.getElementById('dialogInputWrap');
+    const inputEl = document.getElementById('dialogInput');
+    if (input) {
+      wrap.style.display = 'flex';
+      document.getElementById('dialogLabel').textContent = label;
+      inputEl.value = value;
+      setTimeout(() => { inputEl.focus(); inputEl.select(); }, 50);
+    } else {
+      wrap.style.display = 'none';
+    }
+    document.getElementById('dialogMask').classList.add('show');
+  });
+}
+function dialogClose(result) {
+  document.getElementById('dialogMask').classList.remove('show');
+  if (dialogResolve) { dialogResolve(result); dialogResolve = null; }
+}
+function dialogConfirm(message) {
+  return dialogShow({ title: 'Подтверждение', message });
+}
+function dialogPrompt(label, value) {
+  return dialogShow({ title: 'Ввод', message: '', input: true, label, value });
+}
+// Подключение кнопок диалога выполняется в attachEvents.
+
+// ---------- Shortcut ----------
+document.addEventListener('keydown', e => {
+  // Ctrl/Cmd+K — фокус в поле поиска
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+    e.preventDefault();
+    const search = document.getElementById('search');
+    search.focus();
+    search.select();
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p') {
+    e.preventDefault();
+    if (document.getElementById('paletteMask').classList.contains('show')) closePalette(); else openPalette();
+    return;
+  }
+  // Ctrl+Z — отмена последнего опасного действия (вне полей ввода и редактора).
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+    if (document.getElementById('modalMask').classList.contains('show')) return;
+    if (undoState) { e.preventDefault(); undoLastAction(); }
+    return;
+  }
+  // Ctrl+H в редакторе — поиск и замена.
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'h') {
+    if (document.getElementById('modalMask').classList.contains('show')) { e.preventDefault(); openFindBar(); }
+    return;
+  }
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n') {
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
+    const mask = document.getElementById('modalMask');
+    if (mask.classList.contains('show')) return;
+    e.preventDefault();
+    openEditor();
+  }
+  const mask = document.getElementById('modalMask');
+  if (mask.classList.contains('show') && e.key === 'Escape') { e.preventDefault(); requestCloseEditor(); return; }
+  // Esc закрывает просмотр заметки (если не открыты палитра/диалог).
+  if (e.key === 'Escape' && viewingId) {
+    const pal = document.getElementById('paletteMask');
+    const dlg = document.getElementById('dialogMask');
+    if ((pal && pal.classList.contains('show')) || (dlg && dlg.classList.contains('show'))) return;
+    e.preventDefault();
+    closeNoteView();
+  }
+});
+
+// ---------- Init ----------
+// Вывод сообщения об ошибке в область заметок. Текст задаётся через textContent,
+// чтобы пользовательские данные внутри сообщения не трактовались как HTML (XSS).
+function renderFatal(message) {
+  const box = document.getElementById('notes');
+  if (!box) return;
+  box.innerHTML = '';
+  const el = document.createElement('div');
+  el.className = 'empty';
+  const big = document.createElement('div');
+  big.className = 'big';
+  big.textContent = '⚠️';
+  const msg = document.createElement('div');
+  msg.textContent = message;
+  el.appendChild(big);
+  el.appendChild(msg);
+  box.appendChild(el);
+}
+window.addEventListener('error', function (ev) {
+  renderFatal('Ошибка: ' + (ev && ev.message ? ev.message : 'неизвестная'));
+});
+// Единая точка подключения обработчиков событий (вместо инлайн-атрибутов).
+function attachEvents() {
+  const $ = id => document.getElementById(id);
+  // Дописать отложенные записи в IndexedDB перед закрытием/скрытием вкладки.
+  window.addEventListener('pagehide', flushIdbWrites);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushIdbWrites();
+  });
+  $('burgerBtn').addEventListener('click', toggleSidebar);
+  $('fileBtn').addEventListener('click', chooseFile);
+  // Кнопка «Версии данных»: stopPropagation обязателен, иначе документный
+  // обработчик клика снаружи закроет только что открытое меню.
+  $('backupBtn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const menu = document.getElementById('ctxMenu');
+    if (menu.classList.contains('show')) { closeCtxMenu(); return; }
+    snapshotMenu();
+  });
+  $('diagBtn').addEventListener('click', showDiagnostics);
+  $('exportBtn').addEventListener('click', exportData);
+  $('importBtn').addEventListener('click', importData);
+  $('themeBtn').addEventListener('click', toggleTheme);
+  $('newNoteBtn').addEventListener('click', () => openEditor());
+  // Навигация клавиатурой по карточкам заметок.
+  $('notes').addEventListener('keydown', notesKeyNav);
+  // Делегирование событий карточек: один обработчик вместо тысяч замыканий.
+  $('notes').addEventListener('click', (e) => {
+    const tagEl = e.target.closest('#notes .tag');
+    if (tagEl) {
+      const t = tagEl.textContent;
+      onSearch('');
+      currentPath = [t];
+      renderAll();
+      return;
+    }
+    const card = e.target.closest('#notes .note-card');
+    if (card) selectNote(card.dataset.noteId);
+  });
+  // Двойной клик по карточке — сразу в редактор (одиночный открывает просмотр).
+  $('notes').addEventListener('dblclick', (e) => {
+    if (e.target.closest('.tag')) return; // двойной клик по тэгу — не редактор
+    const card = e.target.closest('#notes .note-card');
+    if (card) openEditor(card.dataset.noteId);
+  });
+  // Просмотр заметки: делегирование на контейнер, без обработчиков на кнопках.
+  $('noteView').addEventListener('click', (e) => {
+    if (e.target.closest('.nv-close')) { closeNoteView(); return; }
+    if (e.target.closest('.nv-edit')) { if (viewingId) openEditor(viewingId); return; }
+    const tagEl = e.target.closest('.nv-tags .tag');
+    if (tagEl) {
+      const name = tagEl.dataset.tag;
+      if (!name) return;
+      onSearch('');
+      goToPath([name]);
+    }
+  });
+  $('notes').addEventListener('contextmenu', (e) => {
+    const card = e.target.closest('#notes .note-card');
+    if (!card) return;
+    e.preventDefault();
+    noteContextMenu(e.clientX, e.clientY, card.dataset.noteId);
+  });
+  $('notes').addEventListener('dragstart', (e) => {
+    const card = e.target.closest('#notes .note-card');
+    if (!card) return;
+    e.dataTransfer.setData(DND_MIME, card.dataset.noteId);
+    e.dataTransfer.effectAllowed = 'move';
+  });
+  // Навигация клавиатурой по дереву папок.
+  $('tree').addEventListener('keydown', treeKeyNav);
+  // Делегирование событий дерева (строки пересоздаются при изменении данных).
+  $('tree').addEventListener('click', treeHandleClick);
+  $('tree').addEventListener('contextmenu', treeHandleContextMenu);
+  $('tree').addEventListener('dragover', treeHandleDragOver);
+  $('tree').addEventListener('dragleave', treeHandleDragLeave);
+  $('tree').addEventListener('drop', treeHandleDrop);
+  // Развернуть/свернуть всё дерево.
+  $('expandAllBtn').addEventListener('click', expandAllTree);
+  $('collapseAllBtn').addEventListener('click', collapseAllTree);
+  // Небольшой debounce: не перефильтровывать все заметки на каждую букву.
+  // Прямые вызовы onSearch() (фасеты, представления, автодополнение) остаются синхронными.
+  let searchDebounce = null;
+  $('search').addEventListener('input', e => {
+    clearTimeout(searchDebounce);
+    const v = e.target.value;
+    searchDebounce = setTimeout(() => onSearch(v), 120);
+  });
+  $('search').addEventListener('keydown', (e) => {
+    const box = document.getElementById('searchSuggest');
+    if (!box.classList.contains('show')) return;
+    const items = [...box.querySelectorAll('.sugg')];
+    if (items.length === 0) return;
+    const idx = items.findIndex(el => el.classList.contains('active'));
+    if (e.key === 'ArrowDown') { e.preventDefault(); items[(idx + 1) % items.length].classList.add('active'); if (idx >= 0) items[idx].classList.remove('active'); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); items[(idx - 1 + items.length) % items.length].classList.add('active'); if (idx >= 0) items[idx].classList.remove('active'); }
+    else if (e.key === 'Enter' && idx >= 0) { e.preventDefault(); items[idx].click(); }
+    else if (e.key === 'Escape') { hideSearchSuggest(); }
+  });
+  $('sortBtn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const menu = document.getElementById('ctxMenu');
+    if (menu.classList.contains('show')) { closeCtxMenu(); return; }
+    sortMenu();
+  });
+  $('facetsToggle').addEventListener('click', (e) => { e.stopPropagation(); toggleFacets(); });
+  $('facetsReset').addEventListener('click', (e) => { e.stopPropagation(); resetFacets(); });
+  $('saveViewBtn').addEventListener('click', (e) => { e.stopPropagation(); promptSaveView(); });
+  $('modalCloseBtn').addEventListener('click', requestCloseEditor);
+  $('btnCancel').addEventListener('click', requestCloseEditor);
+  $('btnSave').addEventListener('click', saveNote);
+  $('btnDelete').addEventListener('click', deleteNote);
+  $('fTags').addEventListener('keydown', tagInputKey);
+  $('fTags').addEventListener('input', updateTagSuggest);
+  $('fTags').addEventListener('focus', updateTagSuggest);
+  // Менеджер тэгов
+  $('tagsBtn').addEventListener('click', openTagManager);
+  $('tmCloseBtn').addEventListener('click', closeTagManager);
+  $('tmDoneBtn').addEventListener('click', closeTagManager);
+  $('tmSearch').addEventListener('input', renderTagManager);
+  $('tmCleanBtn').addEventListener('click', removeOrphanTags);
+  $('tmSimilarBtn').addEventListener('click', highlightSimilarTags);
+  $('tagManagerMask').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeTagManager(); });
+  // Командная палитра
+  $('paletteInput').addEventListener('input', renderPalette);
+  $('paletteInput').addEventListener('keydown', paletteKey);
+  $('paletteMask').addEventListener('click', (e) => { if (e.target === e.currentTarget) closePalette(); });
+  // WYSIWYG: переключатели Редактор / Разделить / Предпросмотр + тулбар
+  $('mdEditBtn').addEventListener('click', () => setMdMode('edit'));
+  $('mdSplitBtn').addEventListener('click', () => setMdMode('split'));
+  $('mdPreviewBtn').addEventListener('click', () => setMdMode('preview'));
+  document.querySelectorAll('#mdToolbar .md-tb').forEach(b => {
+    b.addEventListener('click', () => applyMdFormat(b.dataset.cmd));
+  });
+  $('fBody').addEventListener('input', () => {
+    updateMdWordCount(document.getElementById('fBody').value); // счётчик — сразу
+    if (mdMode === 'preview' || mdMode === 'split') scheduleMdPreview();
+  });
+  $('fBody').addEventListener('scroll', syncMdScroll);
+  // Поиск и замена в редакторе
+  $('mdFindBtn').addEventListener('click', () => {
+    const bar = document.getElementById('mdFindbar');
+    if (bar.classList.contains('show')) closeFindBar(); else openFindBar();
+  });
+  $('mdFindClose').addEventListener('click', closeFindBar);
+  $('mdFindNext').addEventListener('click', mdFindNext);
+  $('mdReplaceOne').addEventListener('click', mdReplaceOne);
+  $('mdReplaceAll').addEventListener('click', mdReplaceAll);
+  $('mdFind').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); mdFindNext(); } if (e.key === 'Escape') closeFindBar(); });
+  $('mdReplace').addEventListener('keydown', (e) => { if (e.key === 'Escape') closeFindBar(); });
+  // Универсальный диалог
+  $('dialogOkBtn').addEventListener('click', () => {
+    const inp = document.getElementById('dialogInput');
+    const wrap = document.getElementById('dialogInputWrap');
+    const result = wrap.style.display !== 'none' ? inp.value : true;
+    dialogClose(result);
+  });
+  $('dialogCancelBtn').addEventListener('click', () => dialogClose(false));
+  $('dialogCloseBtn').addEventListener('click', () => dialogClose(false));
+  $('dialogInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); document.getElementById('dialogOkBtn').click(); }
+    if (e.key === 'Escape') { e.preventDefault(); document.getElementById('dialogCancelBtn').click(); }
+  });
+  $('dialogMask').addEventListener('click', (e) => { if (e.target === e.currentTarget) dialogClose(false); });
+  // клик по маске (позади модалки) закрывает редактор
+  $('modalMask').addEventListener('click', e => { if (e.target === e.currentTarget) requestCloseEditor(); });
+}
+// Обычный старт после подготовки хранилища.
+function startApp() {
+  loadState();
+  restoreLastView();
+  renderAll();
+  renderFacets();
+  renderViews();
+  restoreFileHandle(); // восстановить привязку файла (асинхронно, если была)
+}
+try {
+  attachEvents();
+  if (typeof indexedDB === 'undefined' || !indexedDB) {
+    // Нет IndexedDB (старые браузеры, тесты в jsdom) — прежний путь через localStorage.
+    startApp();
+  } else {
+    // Сначала поднимаем тяжёлые данные из базы, затем грузим состояние.
+    storageInit().then(startApp).catch(err => {
+      renderFatal('Не удалось запустить приложение: ' + (err && err.message ? err.message : err) + '. Проверьте консоль браузера (F12).');
+    });
+  }
+} catch (err) {
+  renderFatal('Не удалось запустить приложение: ' + (err && err.message ? err.message : err) + '. Проверьте консоль браузера (F12).');
+}
+
+// Хук для автотестов (доступ к состоянию и утилитам). На работу приложения не влияет.
+if (window) {
+  window.__app = {
+    state, tagsOf, pathTagsOf, noteBelongsToPath, buildTree,
+    applyData, ensureTag, tagName, pruneTagIds, renameTag, deleteTag, invalidateTree,
+    isValidData, normalizeNote, renderMarkdown, highlightElement, parseLocalDate, byteLength,
+    renderAll, renderNotes, renderBreadcrumbs, notesInPath, onSearch, resetNavigation, closeEditor,
+    sortNotes, tagCount, tagColor, setTagColor, moveNoteToTag, pushHistory, restoreHistory,
+    setSortMode, sortMenu, printNotes, parseQuery, tokenizeQuery, tagToken, matchesSearch, fuzzyMatch,
+    setMdMode, applyMdFormat, updateMdPreview, updateMdWordCount, mdMode,
+    updateSearchSuggest, applySearchSuggest, getParsedQuery, tagCounts, notesInFolder, submenuFor,
+    closeSidebar, toggleSidebar, storageProbe, showDiagnostics, restoreFromBackup,
+    storageGet, storageSet, storageInit, storageClearMemory, flushIdbWrites, idbIdle, fmtSize,
+    loadState, saveState,
+    mergeTags, openTagManager, closeTagManager, renderTagManager, tagManagerRename, tagManagerMerge, tagManagerDelete, tagManagerColor,
+    updateTagSuggest, hideTagSuggest, applyTagSuggest,
+    togglePin, expandAllTree, collapseAllTree, notesKeyNav, treeKeyNav, editorDirty, requestCloseEditor,
+    removeOrphanTags, findSimilarTagNames, highlightSimilarTags,
+    openPalette, closePalette, renderPalette, paletteKey, paletteCommands,
+    loadSnapshots, saveSnapshots, maybeSnapshot, restoreSnapshot, snapshotMenu, checkFileConflict,
+    loadTrash, saveTrash, moveToTrash, restoreFromTrash, emptyTrash, trashMenu,
+    prepareUndo, undoLastAction,
+    openFindBar, closeFindBar, mdFindNext, mdReplaceOne, mdReplaceAll, updateMdToc,
+    humanDate, duplicateNote, exportFound, saveLastView, restoreLastView,
+    openEditor, saveNote, deleteNote,
+    openNoteView, closeNoteView, renderNoteView, goToPath,
+    tagsLowerOf, applyTreeState, safeCssColor, scheduleMdPreview, cancelMdPreview,
+    get selectedId() { return selectedId; },
+    get viewingId() { return viewingId; },
+    get idbMode() { return idbMode; },
+    get idbError() { return idbError; },
+    get currentPath() { return currentPath; },
+    set currentPath(v) { currentPath = Array.isArray(v) ? v : []; },
+    renderFacets, cycleFacet, toggleFacets, addView, deleteView, applyView, loadViews, resetFacets,
+    get collapsed() { return collapsed; },
+    get sortMode() { return sortMode; }
+  };
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,78 @@
+{
+  "app": "note-tree",
+  "version": 2,
+  "exported": "2026-10-22T09:19:30.696Z",
+  "tags": [
+    {
+      "id": "tmvja2gepg8e",
+      "name": "суп",
+      "color": "#8b5cf6"
+    },
+    {
+      "id": "tmvja2gep50t",
+      "name": "русская кухня",
+      "color": "#e5c100"
+    },
+    {
+      "id": "tmvja2gep3za",
+      "name": "говядина",
+      "color": "#e5484d"
+    },
+    {
+      "id": "tmvja2gep4nn",
+      "name": "вьетнамская кухня",
+      "color": "#e5c100"
+    },
+    {
+      "id": "tmvja2gep2fc",
+      "name": "лапша",
+      "color": "#ec4899"
+    },
+    {
+      "id": "tmvjbs9vkr2j",
+      "name": "салат"
+    }
+  ],
+  "notes": [
+    {
+      "title": "Борщ",
+      "body": "Рецепт борща",
+      "tagIds": [
+        "tmvja2gepg8e",
+        "tmvja2gep50t",
+        "tmvja2gep3za"
+      ],
+      "created": 1791544002105,
+      "updated": 1791804541785,
+      "id": "nmv0v1j5lfkngy2",
+      "history": []
+    },
+    {
+      "title": "Pho Bo",
+      "body": "рецепт Pho Bo",
+      "tagIds": [
+        "tmvja2gepg8e",
+        "tmvja2gep4nn",
+        "tmvja2gep3za",
+        "tmvja2gep2fc"
+      ],
+      "created": 1791801627062,
+      "updated": 1791872237341,
+      "id": "nmv54fbueogsitb",
+      "history": []
+    },
+    {
+      "title": "Салат Оливье",
+      "body": "Рецепт салата Оливье",
+      "tagIds": [
+        "tmvja2gep50t",
+        "tmvjbs9vkr2j"
+      ],
+      "created": 1792660514816,
+      "updated": 1792660514816,
+      "id": "nmvjbs9vk9wpayf",
+      "history": []
+    }
+  ],
+  "backup": null
+}
