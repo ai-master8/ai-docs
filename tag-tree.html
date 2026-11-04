@@ -20,7 +20,6 @@
     --shadow-hover: 0 14px 36px rgba(20,30,60,.14);
     --ring: 0 0 0 3px rgba(79,109,245,.22);
     --radius: 14px;
-    --radius-sm: 9px;
   }
   [data-theme="dark"] {
     --bg: #0f1420;
@@ -2614,7 +2613,7 @@ function renderNoteView() {
   const tagsHtml = tagsOf(n).map(t => {
     const c = safeCssColor(tagColor(t));
     const style = c ? ` style="background:${c};color:#fff"` : '';
-    return `<span class="tag clk" data-tag="${escapeHtml(t)}" title="Открыть папку тэга">${escapeHtml(t)}</span>`;
+    return `<span class="tag clk" data-tag="${escapeHtml(t)}"${style} title="Открыть папку тэга">${escapeHtml(t)}</span>`;
   }).join('');
   const bodyHtml = (n.body && n.body.trim())
     ? `<div class="nv-body">${renderMarkdown(n.body)}</div>`

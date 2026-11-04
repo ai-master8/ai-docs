@@ -676,6 +676,15 @@ describe('Просмотр заметки: полный текст в право
     ok(document.querySelector('#notes .note-card .preview').textContent.indexOf('\u2026') !== -1, 'в карточке превью остаётся обрезанным');
   });
 
+  test('цвет тэга в просмотре берётся из таблицы тэгов', () => {
+    seed([{ id: 't1', name: 'a', color: '#ff0000' }], [{ id: 'n1', title: 'x', body: '', tagIds: ['t1'] }]);
+    app.renderAll();
+    app.openNoteView('n1');
+    const tag = document.querySelector('#noteView .nv-tags .tag');
+    ok(tag, 'тэг отрендерен');
+    strictEqual(tag.style.background, 'rgb(255, 0, 0)');
+  });
+
   test('выбор заметки не пересобирает список (прокрутка не сбрасывается)', () => {
     seed([], [
       { id: 'n1', title: 'Раз', body: 'a', tagIds: [], updated: 3 },
