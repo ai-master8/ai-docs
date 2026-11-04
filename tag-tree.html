@@ -194,6 +194,22 @@
   .note-view .tag.clk:hover { filter: brightness(1.15); text-decoration: underline; }
   .note-view .nv-body { font-size: 15px; line-height: 1.65; word-break: break-word; max-width: 78ch; }
   .note-view .nv-empty { color: var(--muted); font-style: italic; }
+  /* Редактор занимает правую часть контента: дерево и список остаются на месте. */
+  .note-editor { display: none; flex: 1; min-width: 0; flex-direction: column; overflow: hidden; background: var(--bg); }
+  .content-split.has-editor .note-editor { display: flex; }
+  .content-split.has-editor .note-view { display: none; }
+  .note-editor .ne-head { flex: 0 0 auto; display: flex; align-items: center; gap: 10px; padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--bg); }
+  .note-editor .ne-head h2 { margin: 0; font-size: 16px; }
+  .note-editor .ne-head .spacer { flex: 1; }
+  .note-editor .ne-close { background: transparent; color: var(--muted); }
+  .note-editor .ne-close:hover { color: var(--text); border-color: var(--accent); }
+  .note-editor .ne-dirty { font-size: 11px; font-weight: 600; color: var(--accent-2); }
+  .note-editor .ne-dirty[hidden] { display: none; }
+  .note-editor .ne-scroll { flex: 1; min-height: 0; overflow: auto; padding: 20px 28px 40px; }
+  .note-editor .ne-inner { width: 100%; max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+  .note-editor .ne-foot { flex: 0 0 auto; padding: 12px 20px; padding-bottom: calc(12px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); background: var(--bg); display: flex; align-items: center; gap: 10px; }
+  .note-editor .ne-foot .spacer { flex: 1; }
+  .note-editor .md-body, .note-editor .md-body textarea, .note-editor .md-body #mdPreview { min-height: 320px; }
   .note-card {
     background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
     box-shadow: var(--shadow); padding: 16px; cursor: pointer;
@@ -390,6 +406,9 @@
     .note-view h1.nv-title { font-size: 20px; }
     .note-view .nv-close-x { display: none; }
     .note-view .nv-close-back { display: inline; }
+    .note-editor .ne-head { padding: 10px 16px; }
+    .note-editor .ne-scroll { padding: 14px 16px 32px; }
+    .note-editor .ne-foot { padding: 10px 16px calc(10px + env(safe-area-inset-bottom)); }
   }
   @media (max-width: 720px) {
     .burger { display: inline-block; min-width: 36px; }
@@ -431,9 +450,11 @@
     #sortBtn, .facets-toggle, .facets-reset, .tree-toolbar button { min-height: 38px; }
     .children { margin-left: 12px; }
     .palette-item { min-height: 40px; padding: 10px 12px; }
-    .tm-act, .modal-foot button, .note-view .nv-head button,
+    .tm-act, .modal-foot button, .ne-foot button, .note-view .nv-head button,
     .md-modes button, .md-findbar button { min-height: 38px; }
     .modal-head .icon { min-width: 36px; min-height: 36px; }
+    .note-editor .ne-head .icon { min-width: 36px; min-height: 36px; }
+    .note-editor .md-body, .note-editor .md-body textarea, .note-editor .md-body #mdPreview { min-height: 240px; }
     .tm-color { width: 32px; height: 32px; }
     .md-tb { min-height: 36px; min-width: 36px; padding: 6px 9px; }
     /* Тулбар Markdown — одна прокручиваемая строка: экономит высоту на телефоне. */
@@ -462,6 +483,8 @@
     /* «Удалить / Отмена / Сохранить» должны влезать в одну строку. */
     .modal-foot { gap: 6px; }
     .modal-foot button { padding-left: 10px; padding-right: 10px; }
+    .ne-foot { gap: 6px; }
+    .ne-foot button { padding-left: 10px; padding-right: 10px; }
   }
 
   /* Печать / экспорт в PDF (window.print) */
@@ -534,90 +557,94 @@
     <div class="content-split" id="contentSplit">
       <div class="notes" id="notes"></div>
       <article class="note-view" id="noteView" aria-label="Просмотр заметки"></article>
+
+      <!-- Редактор живёт в правой части контента, а не в модальном окне:
+           список и дерево остаются видимыми, навигация не блокируется маской. -->
+      <section class="note-editor" id="editorView" aria-label="Редактор заметки">
+        <div class="ne-head">
+          <h2 id="editorTitle">Редактировать заметку</h2>
+          <span class="spacer"></span>
+          <span class="ne-dirty" id="editorDirtyMark" hidden>● не сохранено</span>
+          <button type="button" class="icon ne-close" id="editorCloseBtn" title="Закрыть редактор (Esc)" aria-label="Закрыть редактор">✕</button>
+        </div>
+        <div class="ne-scroll">
+          <div class="ne-inner">
+            <div class="field">
+              <label for="fTitle">Заголовок</label>
+              <input id="fTitle" type="text" placeholder="Заголовок заметки">
+            </div>
+            <div class="field">
+              <label for="fBody">Содержимое</label>
+              <div class="md-modes">
+                <button type="button" class="md-mode active" id="mdEditBtn">✏️ Редактор</button>
+                <button type="button" class="md-mode" id="mdSplitBtn">⇄ Разделить</button>
+                <button type="button" class="md-mode" id="mdPreviewBtn">👁️ Предпросмотр</button>
+                <span class="spacer"></span>
+                <span class="muted-small" id="mdWordCount"></span>
+              </div>
+              <div class="md-box">
+                <div class="md-toolbar" id="mdToolbar">
+                  <button type="button" class="md-tb" data-cmd="h1" title="Заголовок 1">H1</button>
+                  <button type="button" class="md-tb" data-cmd="h2" title="Заголовок 2">H2</button>
+                  <button type="button" class="md-tb" data-cmd="h3" title="Заголовок 3">H3</button>
+                  <span class="md-sep"></span>
+                  <button type="button" class="md-tb" data-cmd="bold" title="Жирный">B</button>
+                  <button type="button" class="md-tb" data-cmd="italic" title="Курсив"><em>I</em></button>
+                  <button type="button" class="md-tb" data-cmd="strike" title="Зачёркнутый"><s>S</s></button>
+                  <button type="button" class="md-tb" data-cmd="code" title="Код">&lt;/&gt;</button>
+                  <span class="md-sep"></span>
+                  <button type="button" class="md-tb" data-cmd="ul" title="Маркированный список">• Список</button>
+                  <button type="button" class="md-tb" data-cmd="ol" title="Нумерованный список">1. Список</button>
+                  <button type="button" class="md-tb" data-cmd="list-todo" title="Задача (чекбокс)">☑ Задача</button>
+                  <button type="button" class="md-tb" data-cmd="quote" title="Цитата">❝</button>
+                  <button type="button" class="md-tb" data-cmd="link" title="Ссылка">🔗</button>
+                  <span class="md-sep"></span>
+                  <button type="button" class="md-tb" data-cmd="hr" title="Разделитель">—</button>
+                  <button type="button" class="md-tb" data-cmd="table" title="Таблица">▦</button>
+                  <button type="button" class="md-tb" data-cmd="clear" title="Очистить форматирование">⌫</button>
+                  <span class="md-sep"></span>
+                  <button type="button" class="md-tb" id="mdFindBtn" title="Поиск и замена (Ctrl+H)">⌕</button>
+                </div>
+                <div class="md-findbar" id="mdFindbar">
+                  <input id="mdFind" placeholder="Найти…" autocomplete="off">
+                  <input id="mdReplace" placeholder="Заменить на…" autocomplete="off">
+                  <button type="button" id="mdFindNext">Найти далее</button>
+                  <button type="button" id="mdReplaceOne">Заменить</button>
+                  <button type="button" id="mdReplaceAll">Заменить все</button>
+                  <button type="button" id="mdFindClose" title="Закрыть (Esc)">✕</button>
+                </div>
+                <div class="md-toc" id="mdToc"></div>
+                <div class="md-body">
+                  <textarea id="fBody" placeholder="Текст заметки…"></textarea>
+                  <div id="mdPreview"></div>
+                </div>
+              </div>
+              <div class="muted-small" style="margin-top:4px">
+                💡 Поддерживается Markdown: <b># Заголовки</b>, <b>**жирный**</b>, <b>*курсив*</b>, <b>~~зачёркнутый~~</b>, <b>`код`</b>, <b>- список</b>, <b>- [ссылка](http://…)</b>, <b>&gt; цитата</b>, <b>---</b>
+              </div>
+            </div>
+            <div class="field">
+              <label for="fTags">Тэги — из их перестановок строится дерево папок слева</label>
+              <div class="tag-field">
+                <input id="fTags" type="text" placeholder="Введите тэг и нажмите Enter (напр. «работа»)" autocomplete="off">
+                <div class="tag-suggest" id="tagSuggest"></div>
+              </div>
+              <div class="tag-badges" id="tagBadges"></div>
+              <div class="tag-hints" id="tagHints"></div>
+              <div class="hint">💡 Заметка с тэгами <b>работа, проект</b> появится в папках <b>работа → проект</b> и <b>проект → работа</b>. Заметка без тэгов — в корне «Все без тэга».</div>
+            </div>
+          </div>
+        </div>
+        <div class="ne-foot">
+          <button class="danger" id="btnDelete" style="display:none">Удалить</button>
+          <div class="spacer"></div>
+          <button id="btnCancel">Отмена</button>
+          <button id="btnSave" class="primary">Сохранить</button>
+        </div>
+      </section>
     </div>
   </section>
 </main>
-
-<div class="modal-mask" id="modalMask">
-  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
-    <div class="modal-head">
-      <h2 id="modalTitle">Новая заметка</h2>
-      <button class="icon" id="modalCloseBtn">✕</button>
-    </div>
-    <div class="modal-body">
-      <div class="field">
-        <label>Заголовок</label>
-        <input id="fTitle" type="text" placeholder="Заголовок заметки">
-      </div>
-      <div class="field">
-        <label>Содержимое</label>
-        <div class="md-modes">
-          <button type="button" class="md-mode active" id="mdEditBtn">✏️ Редактор</button>
-          <button type="button" class="md-mode" id="mdSplitBtn">⇄ Разделить</button>
-          <button type="button" class="md-mode" id="mdPreviewBtn">👁️ Предпросмотр</button>
-          <span class="spacer"></span>
-          <span class="muted-small" id="mdWordCount"></span>
-        </div>
-        <div class="md-box">
-          <div class="md-toolbar" id="mdToolbar">
-            <button type="button" class="md-tb" data-cmd="h1" title="Заголовок 1">H1</button>
-            <button type="button" class="md-tb" data-cmd="h2" title="Заголовок 2">H2</button>
-            <button type="button" class="md-tb" data-cmd="h3" title="Заголовок 3">H3</button>
-            <span class="md-sep"></span>
-            <button type="button" class="md-tb" data-cmd="bold" title="Жирный">B</button>
-            <button type="button" class="md-tb" data-cmd="italic" title="Курсив"><em>I</em></button>
-            <button type="button" class="md-tb" data-cmd="strike" title="Зачёркнутый"><s>S</s></button>
-            <button type="button" class="md-tb" data-cmd="code" title="Код">&lt;/&gt;</button>
-            <span class="md-sep"></span>
-            <button type="button" class="md-tb" data-cmd="ul" title="Маркированный список">• Список</button>
-            <button type="button" class="md-tb" data-cmd="ol" title="Нумерованный список">1. Список</button>
-            <button type="button" class="md-tb" data-cmd="list-todo" title="Задача (чекбокс)">☑ Задача</button>
-            <button type="button" class="md-tb" data-cmd="quote" title="Цитата">❝</button>
-            <button type="button" class="md-tb" data-cmd="link" title="Ссылка">🔗</button>
-            <span class="md-sep"></span>
-            <button type="button" class="md-tb" data-cmd="hr" title="Разделитель">—</button>
-            <button type="button" class="md-tb" data-cmd="table" title="Таблица">▦</button>
-            <button type="button" class="md-tb" data-cmd="clear" title="Очистить форматирование">⌫</button>
-            <span class="md-sep"></span>
-            <button type="button" class="md-tb" id="mdFindBtn" title="Поиск и замена (Ctrl+H)">⌕</button>
-          </div>
-          <div class="md-findbar" id="mdFindbar">
-            <input id="mdFind" placeholder="Найти…" autocomplete="off">
-            <input id="mdReplace" placeholder="Заменить на…" autocomplete="off">
-            <button type="button" id="mdFindNext">Найти далее</button>
-            <button type="button" id="mdReplaceOne">Заменить</button>
-            <button type="button" id="mdReplaceAll">Заменить все</button>
-            <button type="button" id="mdFindClose" title="Закрыть (Esc)">✕</button>
-          </div>
-          <div class="md-toc" id="mdToc"></div>
-          <div class="md-body">
-            <textarea id="fBody" placeholder="Текст заметки…"></textarea>
-            <div id="mdPreview"></div>
-          </div>
-        </div>
-        <div class="muted-small" style="margin-top:4px">
-          💡 Поддерживается Markdown: <b># Заголовки</b>, <b>**жирный**</b>, <b>*курсив*</b>, <b>~~зачёркнутый~~</b>, <b>`код`</b>, <b>- список</b>, <b>- [ссылка](http://…)</b>, <b>&gt; цитата</b>, <b>---</b>
-        </div>
-      </div>
-      <div class="field">
-        <label>Тэги — из их перестановок строится дерево папок слева</label>
-        <div class="tag-field">
-          <input id="fTags" type="text" placeholder="Введите тэг и нажмите Enter (напр. «работа»)" autocomplete="off">
-          <div class="tag-suggest" id="tagSuggest"></div>
-        </div>
-        <div class="tag-badges" id="tagBadges"></div>
-        <div class="tag-hints" id="tagHints"></div>
-        <div class="hint">💡 Заметка с тэгами <b>работа, проект</b> появится в папках <b>работа → проект</b> и <b>проект → работа</b>. Заметка без тэгов — в корне «Все без тэга».</div>
-      </div>
-    </div>
-    <div class="modal-foot">
-      <button class="danger" id="btnDelete" style="display:none">Удалить</button>
-      <div class="spacer"></div>
-      <button id="btnCancel">Отмена</button>
-      <button id="btnSave" class="primary">Сохранить</button>
-    </div>
-  </div>
-</div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <input type="file" id="fileInput" accept=".json" style="display:none">
@@ -713,6 +740,7 @@ const SORT_MODES = [
 let state = { notes: [], tags: [], theme: 'light' };
 let currentPath = [];       // текущая ветка дерева (массив ИМЁН тэгов)
 let editingId = null;       // id заметки в редакторе (null = новая)
+let editorOpen = false;     // редактор занимает правую панель
 let selectedId = null;      // id последней открытой заметки (для подсветки в дереве)
 let viewingId = null;       // id заметки, показанной целиком в правой части (null — списком)
 let currentTags = [];       // тэги в редакторе
@@ -1634,7 +1662,13 @@ function treeHandleClick(e) {
     return;
   }
   const rn = e.target.closest('#tree .root-note');
-  if (rn) { viewingId = null; currentPath = []; renderAll(); selectNote(rn.dataset.noteId); }
+  if (rn) {
+    const id = rn.dataset.noteId;
+    const open = () => { viewingId = null; currentPath = []; renderAll(); selectNote(id); };
+    if (guardUnsavedEditor('В заметке есть несохранённые изменения. Открыть другую заметку без сохранения?', open)) return;
+    if (editorOpen) closeEditor({ silent: true });
+    open();
+  }
 }
 function treeHandleContextMenu(e) {
   const row = e.target.closest('#tree .node-row');
@@ -1749,10 +1783,15 @@ function renderPalette() {
       if (score < 0) return;
       items.push({ label: '🏷️ #' + t, hint: tagCount(t) + ' замет.', score, run: () => {
         closePalette();
-        const s = document.getElementById('search');
-        if (s) s.value = '';
-        onSearch('');
-        goToPathRevealed([t]);
+        const go = () => {
+          const s = document.getElementById('search');
+          if (s) s.value = '';
+          onSearch('');
+          goToPathRevealed([t]);
+        };
+        if (guardUnsavedEditor('В заметке есть несохранённые изменения. Перейти к тэгу без сохранения?', go)) return;
+        if (editorOpen) closeEditor({ silent: true });
+        go();
       } });
     });
     addGroup('Папки и тэги', sortByScore(items).slice(0, 12));
@@ -2344,7 +2383,7 @@ function notesKeyNav(e) {
   } else if ((e.key === 'Delete' || e.key === 'Backspace') && idx >= 0) {
     e.preventDefault();
     const id = cards[idx].dataset.noteId;
-    if (id) { editingId = id; deleteNote(); }
+    if (id) deleteNote(id);
   }
 }
 
@@ -2477,6 +2516,9 @@ function resetNoteListWidth() {
 function openNoteView(id) {
   const n = noteById(id);
   if (!n) return;
+  // Уход из редактора с несохранёнными правками — только после подтверждения.
+  if (guardUnsavedEditor('В заметке есть несохранённые изменения. Открыть другую заметку без сохранения?', () => openNoteView(id))) return;
+  if (editorOpen) closeEditor({ silent: true });
   const split = document.getElementById('contentSplit');
   const notesEl = document.getElementById('notes');
   const wasOpen = !!(split && split.classList.contains('has-view'));
@@ -2530,6 +2572,8 @@ function closeNoteView() {
 }
 // Сменить папку/фильтр: просмотр закрываем, чтобы не показывать заметку вне контекста.
 function goToPath(path) {
+  if (guardUnsavedEditor('В заметке есть несохранённые изменения. Перейти в другую папку без сохранения?', () => goToPath(path))) return;
+  if (editorOpen) closeEditor({ silent: true });
   viewingId = null;
   currentPath = path;
   renderAll();
@@ -2558,8 +2602,13 @@ function renderNoteView() {
   if (!box || !split) return;
   const n = viewingId ? noteById(viewingId) : null;
   if (!n) viewingId = null; // заметку удалили или данные заменили — просто закрываем
-  split.classList.toggle('has-view', !!n);
-  if (!n) { resetNoteListWidth(); box.innerHTML = ''; return; }
+  // Панель справа открыта и при просмотре, и при редактировании (в т.ч. новой заметки).
+  split.classList.toggle('has-view', !!n || editorOpen);
+  if (!n) {
+    if (!editorOpen) resetNoteListWidth();
+    box.innerHTML = '';
+    return;
+  }
   const upd = humanDate(n.updated || n.created);
   const cre = humanDate(n.created || n.updated);
   const tagsHtml = tagsOf(n).map(t => {
@@ -2595,15 +2644,44 @@ function selectNote(id) {
   openNoteView(id);
 }
 function openEditor(id) {
+  const target = id || null;
+  if (editorOpen && editingId === target) {
+    const t = document.getElementById('fTitle');
+    if (t) { t.focus(); t.scrollLeft = 0; }
+    return;
+  }
+  // Открытие другой заметки поверх несохранённых правок — только с подтверждением.
+  if (guardUnsavedEditor('В заметке есть несохранённые изменения. Открыть другую заметку без сохранения?', () => openEditor(id))) return;
+  if (editorOpen) closeEditor({ silent: true });
+  openEditorPanel(id);
+}
+// Показать редактор в правой части контента. Список и дерево остаются на месте.
+function openEditorPanel(id) {
   cancelMdPreview();
-  editingId = id || null;
-  if (id) selectedId = id;
-  currentTags = [];
   const n = id ? noteById(id) : null;
-  document.getElementById('modalTitle').textContent = n ? 'Редактировать заметку' : 'Новая заметка';
+  const split = document.getElementById('contentSplit');
+  editingId = n ? id : null;
+  if (n) {
+    // Просмотр остаётся «за» редактором: «Отмена» вернёт к чтению.
+    viewingId = id;
+    selectedId = id;
+    openNoteView(id); // подсветит карточку и запомнит ширину списка
+  } else {
+    viewingId = null;
+    selectedId = null;
+    document.querySelectorAll('#notes .note-card.selected').forEach(c => c.classList.remove('selected'));
+    if (split) split.classList.add('has-view');
+    const notesEl = document.getElementById('notes');
+    if (notesEl) notesEl.style.flex = '';
+    editorOpen = true;
+    renderNoteView(); // сохраняет раскрытую панель даже без выбранной заметки
+  }
+  editorOpen = true;
+  currentTags = n ? tagsOf(n) : (currentPath.length ? currentPath.slice() : []);
+  const titleEl = document.getElementById('editorTitle');
+  if (titleEl) titleEl.textContent = n ? 'Редактировать заметку' : 'Новая заметка';
   document.getElementById('fTitle').value = n ? n.title : '';
   document.getElementById('fBody').value = n ? n.body : '';
-  currentTags = n ? tagsOf(n) : (currentPath.length ? currentPath.slice() : []);
   document.getElementById('btnDelete').style.display = n ? 'inline-block' : 'none';
   document.getElementById('fTags').value = ''; // не тащим недописанный тэг из прошлого раза
   closeFindBar();
@@ -2613,39 +2691,88 @@ function openEditor(id) {
   setMdMode('edit'); // всегда открываем в режиме редактирования
   updateMdWordCount(document.getElementById('fBody').value);
   editorSnapshot = editorStateString();
-  document.getElementById('modalMask').classList.add('show');
-  const titleEl = document.getElementById('fTitle');
-  titleEl.focus();
+  updateEditorDirtyMark();
+  if (split) split.classList.add('has-editor');
+  const scroller = document.querySelector('#editorView .ne-scroll');
+  if (scroller) scroller.scrollTop = 0;
+  const titleInput = document.getElementById('fTitle');
+  titleInput.focus();
   // Длинный заголовок не должен открываться «с конца»: показываем начало.
-  titleEl.scrollLeft = 0;
+  titleInput.scrollLeft = 0;
+  toggleSidebarIfMobile();
 }
 // Строка состояния редактора для обнаружения несохранённых изменений.
 function editorStateString() {
   return [
     document.getElementById('fTitle').value,
     document.getElementById('fBody').value,
+    document.getElementById('fTags').value,
     currentTags.slice().sort().join('\u0001')
   ].join('\u0002');
 }
 // Есть ли в редакторе несохранённые изменения.
 function editorDirty() {
-  const mask = document.getElementById('modalMask');
-  if (!mask.classList.contains('show')) return false;
+  if (!editorOpen) return false;
   return editorStateString() !== editorSnapshot;
 }
+// Перед уходом из редактора с правками — подтверждение.
+// true означает, что действие отложено до ответа пользователя.
+function guardUnsavedEditor(message, action) {
+  if (!editorOpen || !editorDirty()) return false;
+  dialogConfirm(message).then(ok => {
+    if (ok) { closeEditor({ silent: true }); action(); }
+  });
+  return true;
+}
+// Индикатор «● не сохранено» в шапке редактора.
+function updateEditorDirtyMark() {
+  const mark = document.getElementById('editorDirtyMark');
+  if (mark) mark.hidden = !editorDirty();
+}
+// Синхронизировать имена тэгов в открытом редакторе с таблицей:
+// переименование/слияние/удаление не должны «воскрешать» старые имена при сохранении.
+function remapEditorTags(mapper) {
+  if (!editorOpen) return;
+  const seen = new Set();
+  const next = [];
+  currentTags.forEach(name => {
+    const mapped = mapper(name);
+    const clean = mapped == null ? '' : String(mapped).trim();
+    if (!clean) return;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    next.push(clean);
+  });
+  currentTags = next;
+  renderTagBadges();
+  renderTagHints();
+  updateEditorDirtyMark();
+}
 // Запросить закрытие редактора: если есть изменения — подтвердить.
-async function requestCloseEditor() {
+function requestCloseEditor() {
+  if (!editorOpen) return;
   if (editorDirty()) {
-    const ok = await dialogConfirm('В заметке есть несохранённые изменения. Закрыть без сохранения?');
-    if (!ok) return;
+    dialogConfirm('В заметке есть несохранённые изменения. Закрыть без сохранения?')
+      .then(ok => { if (ok) closeEditor(); });
+    return;
   }
   closeEditor();
 }
-function closeEditor() {
+function closeEditor(opts) {
+  const o = opts || {};
   cancelMdPreview();
-  document.getElementById('modalMask').classList.remove('show');
   hideTagSuggest();
+  editorOpen = false;
   editingId = null;
+  const split = document.getElementById('contentSplit');
+  if (split) split.classList.remove('has-editor');
+  updateEditorDirtyMark();
+  if (o.silent) return;
+  // Возвращаемся к просмотру заметки (если она ещё существует) или к списку.
+  renderNoteView();
+  const card = viewingId ? findNoteCard(viewingId) : null;
+  if (card) { try { card.focus(); } catch (e) {} }
 }
 function addTagInput() {
   const input = document.getElementById('fTags');
@@ -2678,6 +2805,7 @@ function renderTagBadges() {
     b.querySelector('.x').onclick = () => removeTag(i);
     el.appendChild(b);
   });
+  updateEditorDirtyMark();
 }
 // Количество заметок с тэгом (по имени).
 // Строится за один проход по всем заметкам и кэшируется до изменения данных
@@ -2958,6 +3086,7 @@ function pushHistory(n) {
 }
 
 function saveNote() {
+  if (!editorOpen) return;
   const title = document.getElementById('fTitle').value.trim();
   const body = document.getElementById('fBody').value;
   // Если в поле тэгов остался введённый, но не подтверждённый текст — учесть его.
@@ -2970,6 +3099,7 @@ function saveNote() {
   names.forEach(name => { const id = ensureTag(name); if (id && !ids.includes(id)) ids.push(id); });
   rebuildTagIndex();
   invalidateTree();
+  let savedId = editingId;
   if (editingId) {
     const n = noteById(editingId);
     if (n) {
@@ -2978,27 +3108,40 @@ function saveNote() {
       n.title = title; n.body = body; n.tagIds = ids; n.updated = Date.now();
     }
   } else {
-    state.notes.push(normalizeNote({ title, body, tagIds: ids, created: Date.now(), updated: Date.now() }));
+    const created = normalizeNote({ title, body, tagIds: ids, created: Date.now(), updated: Date.now() });
+    state.notes.push(created);
+    savedId = created.id;
   }
+  // После сохранения показываем заметку в режиме чтения, а не пустую панель.
+  viewingId = savedId || null;
+  selectedId = savedId || null;
   saveState();
   saveToFile();
+  closeEditor({ silent: true });
   renderAll();
-  closeEditor();
   notify('✅ Заметка сохранена');
 }
-async function deleteNote() {
-  if (!editingId) return;
+// Просит подтверждение и удаляет заметку. id можно передать из контекстного меню
+// или клавиатуры; без него удаляется заметка, открытая в редакторе.
+async function deleteNote(id) {
+  const targetId = id || editingId;
+  if (!targetId) return;
   const ok = await dialogConfirm('Удалить заметку?');
   if (!ok) return;
   prepareUndo('удаление заметки');
-  const victim = noteById(editingId);
+  const victim = noteById(targetId);
   if (victim) moveToTrash(victim);
-  state.notes = state.notes.filter(x => x.id !== editingId);
+  state.notes = state.notes.filter(x => x.id !== targetId);
+  if (editingId === targetId) {
+    editingId = null;
+    closeEditor({ silent: true });
+  }
+  if (viewingId === targetId) viewingId = null;
+  if (selectedId === targetId) selectedId = null;
   invalidateTree();
   saveState();
   saveToFile();
   renderAll();
-  closeEditor();
   notify('🗑️ Заметка удалена');
 }
 
@@ -3042,6 +3185,20 @@ function updateSearchClear() {
   if (btn) btn.hidden = !searchQuery;
 }
 function onSearch(v) {
+  if (editorOpen && editorDirty()) {
+    dialogConfirm('В заметке есть несохранённые изменения. Перейти к поиску без сохранения?')
+      .then(ok => {
+        if (ok) { closeEditor({ silent: true }); onSearch(v); }
+        else {
+          // Отмена — возвращаем в поле прежний запрос, чтобы оно не расходилось с выдачей.
+          const input = document.getElementById('search');
+          if (input) input.value = searchQuery;
+          updateSearchClear();
+        }
+      });
+    return;
+  }
+  if (editorOpen) closeEditor({ silent: true });
   searchQuery = v.trim();
   updateSearchClear();
   renderSearchScope();
@@ -3449,6 +3606,7 @@ async function writeToFileHandle(handle, payload, savedState) {
 // Сбросить навигацию/поиск/свёрнутость и состояние редактора.
 // Используется после полной замены данных (импорт, восстановление, чтение из файла).
 function resetNavigation() {
+  closeEditor({ silent: true });
   currentPath = [];
   searchQuery = '';
   searchScope = 'all';
@@ -3629,6 +3787,8 @@ function renameTag(oldName, newName) {
   t.name = clean;
   rebuildTagIndex();
   invalidateTree();
+  // Открытый редактор держит имена тэгов — обновляем их вместе с таблицей.
+  remapEditorTags(n => (sameName(n, oldName) ? clean : n));
   // пути и свёрнутость построены по именам — пересчитать под новое имя
   currentPath = currentPath.map(p => (sameName(p, oldName) ? clean : p));
   const newCollapsed = new Set();
@@ -3650,6 +3810,7 @@ async function deleteTag(name) {
   invalidateTree();
   // очищаем tagIds заметок от ссылок на удалённый тэг
   state.notes.forEach(n => { n.tagIds = pruneTagIds((n.tagIds || [])); });
+  remapEditorTags(n => (sameName(n, name) ? '' : n));
   currentPath = currentPath.filter(p => !sameName(p, name));
   const newCollapsed = new Set();
   collapsed.forEach(k => {
@@ -3697,6 +3858,8 @@ function mergeTags(fromName, intoName) {
   state.tags = state.tags.filter(x => x.id !== src.id);
   rebuildTagIndex();
   invalidateTree();
+  // В открытом редакторе заменяем имя исходного тэга на целевое.
+  remapEditorTags(n => (sameName(n, fromName) ? intoName : n));
   // обновляем навигацию/свёрнутость: имя исходного тэга в пути заменяем на целевое
   currentPath = currentPath.map(p => (sameName(p, fromName) ? intoName : p));
   const newCollapsed = new Set();
@@ -4067,7 +4230,7 @@ function noteContextMenu(x, y, noteId) {
     { label: '⬇️ Экспорт (TXT)', run: () => exportTxt([n]) },
     { label: '🖨️ Печать/PDF', run: () => printNotes([n]) },
     '-',
-    { label: '🗑️ Удалить', run: () => { editingId = n.id; deleteNote(); }, danger: true }
+    { label: '🗑️ Удалить', run: () => deleteNote(n.id), danger: true }
   ]);
 }
 // Дублировать заметку (копия с теми же тэгами, история не копируется).
@@ -4335,10 +4498,9 @@ document.addEventListener('keydown', e => {
   if ((e.key === '/' || e.code === 'Slash') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
     const t = e.target;
     const typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
-    const modal = document.getElementById('modalMask');
     const pal = document.getElementById('paletteMask');
     const dlg = document.getElementById('dialogMask');
-    if (!typing && !(modal && modal.classList.contains('show')) && !(pal && pal.classList.contains('show')) && !(dlg && dlg.classList.contains('show'))) {
+    if (!typing && !editorOpen && !(pal && pal.classList.contains('show')) && !(dlg && dlg.classList.contains('show'))) {
       e.preventDefault();
       const search = document.getElementById('search');
       search.focus();
@@ -4350,25 +4512,37 @@ document.addEventListener('keydown', e => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
     const t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
-    if (document.getElementById('modalMask').classList.contains('show')) return;
+    if (editorOpen) return;
     if (undoState) { e.preventDefault(); undoLastAction(); }
     return;
   }
   // Ctrl+H в редакторе — поиск и замена.
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'h') {
-    if (document.getElementById('modalMask').classList.contains('show')) { e.preventDefault(); openFindBar(); }
+    if (editorOpen) { e.preventDefault(); openFindBar(); }
     return;
   }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'n') {
     const t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return;
-    const mask = document.getElementById('modalMask');
-    if (mask.classList.contains('show')) return;
     e.preventDefault();
     openEditor();
+    return;
   }
-  const mask = document.getElementById('modalMask');
-  if (mask.classList.contains('show') && e.key === 'Escape') { e.preventDefault(); requestCloseEditor(); return; }
+  if (e.key === 'Escape') {
+    // Модальные окна поверх редактора (палитра, диалог, менеджер тэгов)
+    // закрываются первыми и не трогают несохранённые правки.
+    const dlg = document.getElementById('dialogMask');
+    if (dlg && dlg.classList.contains('show')) { e.preventDefault(); dialogClose(false); return; }
+    const pal = document.getElementById('paletteMask');
+    if (pal && pal.classList.contains('show')) { e.preventDefault(); closePalette(); return; }
+    const tm = document.getElementById('tagManagerMask');
+    if (tm && tm.classList.contains('show')) { e.preventDefault(); closeTagManager(); return; }
+    // Esc внутри поля тэгов мог уже закрыть автодополнение — не закрываем редактор.
+    if (e.defaultPrevented) return;
+    const findBar = document.getElementById('mdFindbar');
+    if (editorOpen && findBar.classList.contains('show')) { e.preventDefault(); closeFindBar(); return; }
+    if (editorOpen) { e.preventDefault(); requestCloseEditor(); return; }
+  }
   // Esc закрывает просмотр заметки (если не открыты палитра/диалог).
   if (e.key === 'Escape' && viewingId) {
     const pal = document.getElementById('paletteMask');
@@ -4434,18 +4608,24 @@ function attachEvents() {
       e.stopPropagation();
       let path = [];
       try { path = JSON.parse(pathBtn.dataset.path || '[]'); } catch (err) {}
-      const input = document.getElementById('search');
-      if (input) input.value = '';
-      onSearch('');
-      goToPathRevealed(Array.isArray(path) ? path : []);
+      const go = () => {
+        const input = document.getElementById('search');
+        if (input) input.value = '';
+        onSearch('');
+        goToPathRevealed(Array.isArray(path) ? path : []);
+      };
+      if (guardUnsavedEditor('В заметке есть несохранённые изменения. Перейти к папке без сохранения?', go)) return;
+      if (editorOpen) closeEditor({ silent: true });
+      go();
       return;
     }
     const tagEl = e.target.closest('#notes .tag');
     if (tagEl) {
       const t = tagEl.textContent;
-      onSearch('');
-      currentPath = [t];
-      renderAll();
+      const go = () => { onSearch(''); currentPath = [t]; renderAll(); };
+      if (guardUnsavedEditor('В заметке есть несохранённые изменения. Перейти к тэгу без сохранения?', go)) return;
+      if (editorOpen) closeEditor({ silent: true });
+      go();
       return;
     }
     const card = e.target.closest('#notes .note-card');
@@ -4534,12 +4714,13 @@ function attachEvents() {
   $('facetsToggle').addEventListener('click', (e) => { e.stopPropagation(); toggleFacets(); });
   $('facetsReset').addEventListener('click', (e) => { e.stopPropagation(); resetFacets(); });
   $('saveViewBtn').addEventListener('click', (e) => { e.stopPropagation(); promptSaveView(); });
-  $('modalCloseBtn').addEventListener('click', requestCloseEditor);
+  $('editorCloseBtn').addEventListener('click', requestCloseEditor);
   $('btnCancel').addEventListener('click', requestCloseEditor);
   $('btnSave').addEventListener('click', saveNote);
-  $('btnDelete').addEventListener('click', deleteNote);
+  $('btnDelete').addEventListener('click', () => deleteNote());
+  $('fTitle').addEventListener('input', updateEditorDirtyMark);
   $('fTags').addEventListener('keydown', tagInputKey);
-  $('fTags').addEventListener('input', updateTagSuggest);
+  $('fTags').addEventListener('input', () => { updateTagSuggest(); updateEditorDirtyMark(); });
   $('fTags').addEventListener('focus', updateTagSuggest);
   // Менеджер тэгов
   $('tagsBtn').addEventListener('click', openTagManager);
@@ -4562,6 +4743,7 @@ function attachEvents() {
   });
   $('fBody').addEventListener('input', () => {
     updateMdWordCount(document.getElementById('fBody').value); // счётчик — сразу
+    updateEditorDirtyMark();
     if (mdMode === 'preview' || mdMode === 'split') scheduleMdPreview();
   });
   $('fBody').addEventListener('scroll', syncMdScroll);
@@ -4590,8 +4772,6 @@ function attachEvents() {
     if (e.key === 'Escape') { e.preventDefault(); document.getElementById('dialogCancelBtn').click(); }
   });
   $('dialogMask').addEventListener('click', (e) => { if (e.target === e.currentTarget) dialogClose(false); });
-  // клик по маске (позади модалки) закрывает редактор
-  $('modalMask').addEventListener('click', e => { if (e.target === e.currentTarget) requestCloseEditor(); });
 }
 // Попросить браузер не вытеснять данные при нехватке места (если поддерживается).
 function requestPersistentStorage() {
@@ -4655,6 +4835,8 @@ if (window) {
     tagsLowerOf, applyTreeState, safeCssColor, scheduleMdPreview, cancelMdPreview,
     get selectedId() { return selectedId; },
     get viewingId() { return viewingId; },
+    get editingId() { return editingId; },
+    get editorOpen() { return editorOpen; },
     get idbMode() { return idbMode; },
     get idbError() { return idbError; },
     get currentPath() { return currentPath; },

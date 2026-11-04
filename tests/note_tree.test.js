@@ -403,6 +403,105 @@ describe('Интеграция редактора и рендера', () => {
     deepEqual(app.state.notes[0].tagIds, [app.state.tags[0].id]);
   });
 
+  test('после сохранения новая заметка открывается в просмотре', () => {
+    app.currentPath = [];
+    app.openEditor();
+    document.getElementById('fTitle').value = 'Свежая заметка';
+    document.getElementById('fBody').value = 'Текст';
+    app.saveNote();
+    strictEqual(app.editorOpen, false, 'редактор закрыт');
+    ok(app.viewingId, 'заметка выбрана');
+    strictEqual(document.getElementById('contentSplit').classList.contains('has-editor'), false);
+    strictEqual(document.querySelector('#noteView .nv-title').textContent, 'Свежая заметка');
+  });
+
+  test('редактор открывается в правой панели, список остаётся на месте', () => {
+    seed([], [{ id: 'n1', title: 'Заметка', body: 'текст', tagIds: [] }]);
+    app.renderAll();
+    app.openEditor('n1');
+    const split = document.getElementById('contentSplit');
+    ok(split.classList.contains('has-editor'), 'включён режим редактора');
+    ok(split.classList.contains('has-view'), 'панель занимает правую часть');
+    ok(document.querySelector('#notes .note-card'), 'список заметок не скрыт');
+    strictEqual(document.querySelector('#editorView #fTitle').value, 'Заметка');
+    strictEqual(document.getElementById('editorDirtyMark').hidden, true, 'без правок индикатор скрыт');
+
+    document.getElementById('fTitle').value = 'Изменено';
+    document.getElementById('fTitle').dispatchEvent(new window.Event('input', { bubbles: true }));
+    strictEqual(app.editorDirty(), true);
+    strictEqual(document.getElementById('editorDirtyMark').hidden, false, 'индикатор показал правки');
+    app.closeEditor();
+  });
+
+  test('переименование тэга обновляет открытый редактор и не воскрешает старое имя', () => {
+    seed([{ id: 't1', name: 'a' }], [{ id: 'n1', title: 'Заметка', body: 'текст', tagIds: ['t1'] }]);
+    app.renderAll();
+    app.openEditor('n1');
+    app.renameTag('a', 'b');
+    const badges = [...document.querySelectorAll('#tagBadges .tag-badge')].map(b => b.textContent);
+    ok(badges.some(t => t.includes('b')), 'бейдж показывает новое имя');
+    app.saveNote();
+    ok(!app.state.tags.some(t => t.name === 'a'), 'старое имя не вернулось в таблицу');
+    ok(app.state.tags.some(t => t.name === 'b'), 'новое имя сохранено');
+  });
+
+  test('отмена редактирования возвращает к просмотру заметки', () => {
+    seed([], [{ id: 'n1', title: 'Заметка', body: 'текст', tagIds: [] }]);
+    app.renderAll();
+    app.openEditor('n1');
+    app.closeEditor();
+    strictEqual(app.editorOpen, false);
+    strictEqual(app.viewingId, 'n1', 'просмотр остаётся открытым');
+    strictEqual(document.getElementById('contentSplit').classList.contains('has-editor'), false);
+    strictEqual(document.querySelector('#noteView .nv-title').textContent, 'Заметка');
+  });
+
+  test('Esc закрывает редактор без изменений', () => {
+    seed([], [{ id: 'n1', title: 'Заметка', body: 'текст', tagIds: [] }]);
+    app.renderAll();
+    app.openEditor('n1');
+    document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    strictEqual(app.editorOpen, false);
+    strictEqual(app.viewingId, 'n1');
+  });
+
+  test('отмена перехода в поиск возвращает редактор и прежний запрос', async () => {
+    seed([], [{ id: 'n1', title: 'Заметка', body: 'текст', tagIds: [] }]);
+    app.renderAll();
+    app.openEditor('n1');
+    document.getElementById('fTitle').value = 'Изменено';
+    document.getElementById('search').value = 'текст';
+    app.onSearch('текст');
+    ok(document.getElementById('dialogMask').classList.contains('show'), 'показан диалог');
+    document.getElementById('dialogCancelBtn').click();
+    await Promise.resolve();
+    strictEqual(app.editorOpen, true, 'редактор остался открыт');
+    strictEqual(document.getElementById('search').value, '', 'поле вернулось к прежнему запросу');
+  });
+
+  test('уход из редактора с несохранёнными правками требует подтверждения', async () => {
+    seed([{ id: 't1', name: 'a' }], [{ id: 'n1', title: 'Заметка', body: 'текст', tagIds: ['t1'] }]);
+    app.renderAll();
+    app.openEditor('n1');
+    document.getElementById('fTitle').value = 'Изменено';
+    ok(app.editorDirty());
+
+    app.goToPath([]);
+    ok(document.getElementById('dialogMask').classList.contains('show'), 'показан диалог');
+    document.getElementById('dialogCancelBtn').click();
+    await Promise.resolve();
+
+    deepEqual(app.currentPath, [], 'отмена оставила прежнюю папку');
+    strictEqual(app.editorOpen, true, 'редактор не закрыт');
+
+    app.goToPath(['a']);
+    document.getElementById('dialogOkBtn').click();
+    await Promise.resolve();
+
+    deepEqual(app.currentPath, ['a'], 'подтверждение перешло в папку');
+    strictEqual(app.editorOpen, false, 'редактор закрыт после подтверждения');
+  });
+
   test('renderNotes подсвечивает поиск, не ломая разметку ссылки', () => {
     seed([], [{ id: 'n1', title: 'x', body: '[сайт](https://example.com) и http', tagIds: [] }]);
     app.onSearch('http');
@@ -437,7 +536,8 @@ describe('Рендер: делегирование и инкрементальн
     const h3 = document.querySelector('#notes .note-card h3');
     ok(h3, 'карточка отрендерена');
     h3.click();
-    strictEqual(document.getElementById('modalMask').classList.contains('show'), false, 'редактор не открылся');
+    strictEqual(app.editorOpen, false, 'редактор не открылся');
+    strictEqual(document.getElementById('contentSplit').classList.contains('has-editor'), false);
     strictEqual(app.viewingId, 'n1');
     ok(document.getElementById('contentSplit').classList.contains('has-view'), 'включена раскладка с просмотром');
     strictEqual(document.querySelector('#noteView .nv-title').textContent, 'Заметка');
@@ -451,7 +551,7 @@ describe('Рендер: делегирование и инкрементальн
     ok(tag, 'бэйдж тэга отрендерен');
     tag.click();
     deepEqual(app.currentPath, ['a']);
-    strictEqual(document.getElementById('modalMask').classList.contains('show'), false);
+    strictEqual(app.editorOpen, false);
   });
 
   test('клик по папке обновляет дерево без пересоздания DOM', () => {
@@ -649,13 +749,14 @@ describe('Просмотр заметки: полный текст в право
     app.renderAll();
 
     document.querySelector('#notes .note-card').dispatchEvent(new window.MouseEvent('dblclick', { bubbles: true }));
-    ok(document.getElementById('modalMask').classList.contains('show'), 'двойной клик открыл редактор');
+    ok(document.getElementById('contentSplit').classList.contains('has-editor'), 'двойной клик открыл редактор');
+    strictEqual(app.editorOpen, true);
     strictEqual(document.getElementById('fTitle').value, 'Заметка');
     app.closeEditor();
 
     app.openNoteView('n1');
     document.querySelector('#noteView .nv-edit').click();
-    ok(document.getElementById('modalMask').classList.contains('show'), 'кнопка открыла редактор');
+    ok(document.getElementById('contentSplit').classList.contains('has-editor'), 'кнопка открыла редактор');
     app.closeEditor();
   });
 
