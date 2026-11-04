@@ -321,6 +321,9 @@
   .tag-hint:hover { border-color: var(--accent); color: var(--accent); }
   /* Автодополнение в поле ввода тэга */
   .tag-field { position: relative; }
+  /* Обёртка .tag-field ломает растягивание flex-ребёнка: без width input
+     остаётся шириной по умолчанию (~20 символов) и выглядит обрезанным. */
+  .tag-field input { width: 100%; }
   .tag-suggest {
     position: absolute; left: 0; right: 0; top: calc(100% + 2px); z-index: 75;
     background: var(--panel); border: 1px solid var(--border); border-radius: 9px;
