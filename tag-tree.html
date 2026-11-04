@@ -623,6 +623,8 @@
 const LS_KEY = 'noteTreeData_v1';
 const THEME_KEY = 'noteTreeTheme';
 const COLLAPSE_KEY = 'noteTreeCollapsed';
+// Отметка, что стартовое сворачивание дерева уже применено (однократная миграция).
+const COLLAPSE_DEFAULT_KEY = 'noteTreeCollapsedDefaulted';
 const SORT_KEY = 'noteTreeSort';
 const SNAPSHOT_KEY = 'noteTreeSnapshots';
 const SNAPSHOT_MAX = 5;
@@ -1508,6 +1510,33 @@ function isPathActive(path) {
   for (let i = 0; i < path.length; i++) if (path[i] !== currentPath[i]) return false;
   return true;
 }
+// Все ветки с детьми, кроме веток на пути path: предки текущей папки должны
+// оставаться видимыми, иначе активную ветку не будет видно в дереве.
+function allCollapsedExcept(path) {
+  const root = buildTree();
+  const all = new Set();
+  const walk = (node, parentPath) => {
+    node.children.forEach((child, name) => {
+      const p = parentPath ? parentPath.concat(name) : [name];
+      if (child.children.size > 0) all.add(p.join('/'));
+      walk(child, p);
+    });
+  };
+  walk(root, null);
+  const keep = Array.isArray(path) ? path : [];
+  for (let i = 0; i < keep.length; i++) all.delete(keep.slice(0, i + 1).join('/'));
+  return all;
+}
+// Первый запуск: не разворачиваем всё дерево, показываем только верхний уровень
+// и ветку последнего места. Отметка в localStorage нужна, чтобы применить это
+// один раз и дальше уважать выбор пользователя («развернуть всё»).
+function initTreeCollapse() {
+  if (storageGet(COLLAPSE_DEFAULT_KEY) === '1') return;
+  collapsed = allCollapsedExcept(currentPath);
+  saveCollapsed();
+  storageSet(COLLAPSE_DEFAULT_KEY, '1');
+  treeDirty = true;
+}
 // Развернуть всё дерево: очищаем набор свёрнутых веток.
 function expandAllTree() {
   collapsed = new Set();
@@ -1517,17 +1546,7 @@ function expandAllTree() {
 }
 // Свернуть всё дерево: сворачиваем все ветки, у которых есть дети.
 function collapseAllTree() {
-  const root = buildTree();
-  const all = new Set();
-  const walk = (node, parentPath) => {
-    node.children.forEach((child, name) => {
-      const path = parentPath ? parentPath.concat(name) : [name];
-      if (child.children.size > 0) all.add(path.join('/'));
-      walk(child, path);
-    });
-  };
-  walk(root, null);
-  collapsed = all;
+  collapsed = allCollapsedExcept([]);
   saveCollapsed();
   treeDirty = true;
   renderTree();
@@ -4071,6 +4090,7 @@ function attachEvents() {
 function startApp() {
   loadState();
   restoreLastView();
+  initTreeCollapse();
   renderAll();
   renderFacets();
   renderViews();
@@ -4107,7 +4127,7 @@ if (window) {
     loadState, saveState,
     mergeTags, openTagManager, closeTagManager, renderTagManager, tagManagerRename, tagManagerMerge, tagManagerDelete, tagManagerColor,
     updateTagSuggest, hideTagSuggest, applyTagSuggest,
-    togglePin, expandAllTree, collapseAllTree, notesKeyNav, treeKeyNav, editorDirty, requestCloseEditor,
+    togglePin, expandAllTree, collapseAllTree, initTreeCollapse, notesKeyNav, treeKeyNav, editorDirty, requestCloseEditor,
     removeOrphanTags, findSimilarTagNames, highlightSimilarTags,
     openPalette, closePalette, renderPalette, paletteKey, paletteCommands,
     loadSnapshots, saveSnapshots, maybeSnapshot, restoreSnapshot, snapshotMenu, checkFileConflict,

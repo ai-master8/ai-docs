@@ -375,6 +375,35 @@ describe('Рендер: делегирование и инкрементальн
     strictEqual(wrapper.querySelector('.children .node-row'), childRow, 'DOM детей переиспользован');
   });
 
+  test('при первом запуске дерево свёрнуто, но ветка текущего места видна', () => {
+    seed(
+      [{ id: 't1', name: 'a' }, { id: 't2', name: 'b' }],
+      [{ id: 'n1', title: 'x', tagIds: ['t1', 't2'] }]
+    );
+    window.localStorage.removeItem('noteTreeCollapsed');
+    window.localStorage.removeItem('noteTreeCollapsedDefaulted');
+    app.currentPath = ['a'];
+    app.initTreeCollapse();
+    app.renderAll();
+    const rows = [...document.querySelectorAll('#tree .node-row')].map(r => r.dataset.path).sort();
+    // Верхний уровень + раскрытая ветка «a», а «b → a» скрыта.
+    deepEqual(rows, ['a', 'a/b', 'b']);
+    ok(document.querySelector('#tree .node-row[data-path="a"]').parentNode.querySelector('.children'));
+  });
+
+  test('сохранённая свёрнутость не переопределяется при следующих запусках', () => {
+    seed(
+      [{ id: 't1', name: 'a' }, { id: 't2', name: 'b' }],
+      [{ id: 'n1', title: 'x', tagIds: ['t1', 't2'] }]
+    );
+    app.initTreeCollapse(); // однократная миграция стартового сворачивания
+    app.expandAllTree(); // пользователь явно развернул всё — сохраняется пустой набор
+    app.initTreeCollapse(); // повторный запуск не должен снова всё сворачивать
+    app.renderAll();
+    const rows = [...document.querySelectorAll('#tree .node-row')].map(r => r.dataset.path);
+    ok(rows.includes('a/b') && rows.includes('b/a'), 'дерево осталось развёрнутым');
+  });
+
   test('renderAll({ tree: false }) не трогает DOM дерева', () => {
     seedTree();
     const row = document.querySelector('#tree .node-row');
