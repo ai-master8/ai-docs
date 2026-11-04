@@ -236,7 +236,23 @@
   .note-card .note-path .np-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .note-card .note-path .np-show { flex: 0 0 auto; padding: 1px 7px; font-size: 10px; font-weight: 600; color: var(--muted); background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; }
   .note-card .note-path .np-show:hover { color: var(--accent); border-color: var(--accent); }
-  .note-card .dt { font-size: 11px; color: var(--muted); }
+  .note-card .dt { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; color: var(--muted); }
+  /* Рейтинг: звёзды в карточке, просмотре и редакторе */
+  .stars { display: inline-flex; align-items: center; gap: 1px; line-height: 1; }
+  .stars .star { color: var(--muted); opacity: .5; }
+  .stars .star.on { color: #f5a524; opacity: 1; }
+  .note-card .stars { font-size: 13px; }
+  .note-view .nv-meta > .nv-rating { display: inline-flex; align-items: center; gap: 6px; }
+  .note-view .nv-rating .stars { font-size: 13px; }
+  .rating-input { display: inline-flex; align-items: center; gap: 2px; }
+  .rating-input .star-btn {
+    background: transparent; border: 1px solid transparent; border-radius: 8px;
+    padding: 2px 4px; font-size: 26px; line-height: 1; cursor: pointer;
+    color: var(--muted); opacity: .55; transition: transform .1s, color .12s, opacity .12s;
+  }
+  .rating-input .star-btn:hover { transform: scale(1.12); opacity: 1; color: #f5a524; }
+  .rating-input .star-btn.on { color: #f5a524; opacity: 1; }
+  .rating-input .star-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .empty { color: var(--muted); text-align: center; padding: 56px 20px; grid-column: 1 / -1; display: flex; flex-direction: column; align-items: center; gap: 6px; }
   .empty .big { width: 64px; height: 64px; display: grid; place-items: center; font-size: 30px; border-radius: 50%; background: var(--panel-2); border: 1px solid var(--border); margin-bottom: 6px; }
   .empty .empty-title { color: var(--text); font-size: 16px; font-weight: 600; }
@@ -573,6 +589,17 @@
               <input id="fTitle" type="text" placeholder="Заголовок заметки">
             </div>
             <div class="field">
+              <label id="ratingLabel">Рейтинг</label>
+              <div class="rating-input" id="fRating" role="group" aria-labelledby="ratingLabel">
+                <button type="button" class="star-btn" data-rating="1" title="1 из 5">☆</button>
+                <button type="button" class="star-btn" data-rating="2" title="2 из 5">☆</button>
+                <button type="button" class="star-btn" data-rating="3" title="3 из 5">☆</button>
+                <button type="button" class="star-btn" data-rating="4" title="4 из 5">☆</button>
+                <button type="button" class="star-btn" data-rating="5" title="5 из 5">☆</button>
+              </div>
+              <div class="hint">Нажмите на звезду, чтобы поставить оценку; повторный клик по той же звезде сбрасывает её.</div>
+            </div>
+            <div class="field">
               <label for="fBody">Содержимое</label>
               <div class="md-modes">
                 <button type="button" class="md-mode active" id="mdEditBtn">✏️ Редактор</button>
@@ -743,6 +770,7 @@ let editorOpen = false;     // редактор занимает правую п
 let selectedId = null;      // id последней открытой заметки (для подсветки в дереве)
 let viewingId = null;       // id заметки, показанной целиком в правой части (null — списком)
 let currentTags = [];       // тэги в редакторе
+let editorRating = 0;       // рейтинг в редакторе (0–5, 0 — без оценки)
 let editorSnapshot = '';    // снимок состояния редактора (для отслеживания изменений)
 let searchQuery = '';
 let searchScope = 'all';   // all | folder — где искать при непустом запросе
@@ -1118,6 +1146,20 @@ function pruneTagIds(ids) {
   return ids.filter(id => tagById[id] != null); // сохраняем порядок, убираем неизвестные
 }
 
+// Привести рейтинг к целому числу 0–5 (0 — без оценки).
+function clampRating(value) {
+  const n = Math.round(Number(value));
+  return Number.isFinite(n) ? Math.max(0, Math.min(5, n)) : 0;
+}
+// Звёзды рейтинга: закрашенные ★ и пустые ☆ (без пользовательских данных).
+function starsHtml(rating) {
+  const r = clampRating(rating);
+  let stars = '';
+  for (let i = 1; i <= 5; i++) {
+    stars += `<span class="star${i <= r ? ' on' : ''}">${i <= r ? '★' : '☆'}</span>`;
+  }
+  return `<span class="stars" role="img" aria-label="Рейтинг: ${r} из 5" title="Рейтинг: ${r} из 5">${stars}</span>`;
+}
 // Привести заметку к единой структуре. Поле tagIds — массив id тэгов.
 // Поддерживается старый формат (tags — строковые имена): конвертируется в id.
 function normalizeNote(n) {
@@ -1135,6 +1177,7 @@ function normalizeNote(n) {
     created: (n && n.created) || Date.now(),
     updated: (n && n.updated) || Date.now(),
     id: (n && n.id) || uid(),
+    rating: clampRating(n && n.rating),
     history: (n && Array.isArray(n.history)) ? n.history.slice(0, 20) : []
   };
   if (n && n.pinned) rec.pinned = true;
@@ -2351,12 +2394,13 @@ function renderNotes() {
       return `<span class="tag clk" title="${title}"${style}>${escapeHtml(t)}</span>`;
     }).join('');
     const cls = 'note-card' + (n.pinned ? ' pinned' : '') + (selectedId === n.id ? ' selected' : '');
+    const stars = clampRating(n.rating) ? starsHtml(n.rating) : '';
     return `<div class="${cls}" data-note-id="${escapeHtml(n.id)}" tabindex="0" draggable="true">`
       + `<h3>${escapeHtml((n.pinned ? '📌 ' : '') + (n.title || UNTITLED))}</h3>`
       + `<div class="preview">${renderMarkdown(preview)}</div>`
       + pathHtml
       + `<div class="tags">${tagsHtml}</div>`
-      + `<div class="dt">Обновлено: ${escapeHtml(dt)}</div>`
+      + `<div class="dt"><span>Обновлено: ${escapeHtml(dt)}</span>${stars}</div>`
       + `</div>`;
   });
   container.innerHTML = parts.join('');
@@ -2629,6 +2673,7 @@ function renderNoteView() {
     + `<h1 class="nv-title">${n.pinned ? '📌 ' : ''}${escapeHtml(n.title || UNTITLED)}</h1>`
     + '<div class="nv-meta">'
     + (tagsHtml ? `<div class="nv-tags">${tagsHtml}</div>` : '')
+    + (clampRating(n.rating) ? `<span class="nv-rating">${starsHtml(n.rating)}</span>` : '')
     + `<span>Обновлено: ${escapeHtml(upd)}</span>`
     + `<span>Создано: ${escapeHtml(cre)}</span>`
     + (n.history && n.history.length ? `<span>Снимков истории: ${n.history.length}</span>` : '')
@@ -2676,7 +2721,11 @@ function openEditorPanel(id) {
     renderNoteView(); // сохраняет раскрытую панель даже без выбранной заметки
   }
   editorOpen = true;
-  currentTags = n ? tagsOf(n) : (currentPath.length ? currentPath.slice() : []);
+  // Новая заметка создаётся без тэгов: текущая папка — это место просмотра,
+  // а не набор тэгов будущей заметки.
+  currentTags = n ? tagsOf(n) : [];
+  editorRating = n ? clampRating(n.rating) : 0;
+  renderRatingInput();
   const titleEl = document.getElementById('editorTitle');
   if (titleEl) titleEl.textContent = n ? 'Редактировать заметку' : 'Новая заметка';
   document.getElementById('fTitle').value = n ? n.title : '';
@@ -2706,8 +2755,21 @@ function editorStateString() {
     document.getElementById('fTitle').value,
     document.getElementById('fBody').value,
     document.getElementById('fTags').value,
+    String(editorRating),
     currentTags.slice().sort().join('\u0001')
   ].join('\u0002');
+}
+// Показать рейтинг в редакторе: закрашенные звёзды и aria-состояние кнопок.
+function renderRatingInput() {
+  const box = document.getElementById('fRating');
+  if (!box) return;
+  box.querySelectorAll('.star-btn').forEach(btn => {
+    const v = Number(btn.dataset.rating);
+    const on = v <= editorRating;
+    btn.textContent = on ? '★' : '☆';
+    btn.classList.toggle('on', on);
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
 }
 // Есть ли в редакторе несохранённые изменения.
 function editorDirty() {
@@ -3104,10 +3166,10 @@ function saveNote() {
     if (n) {
       // Снимок предыдущей версии — только если содержимое реально изменилось.
       if (n.title !== title || n.body !== body) pushHistory(n);
-      n.title = title; n.body = body; n.tagIds = ids; n.updated = Date.now();
+      n.title = title; n.body = body; n.tagIds = ids; n.rating = editorRating; n.updated = Date.now();
     }
   } else {
-    const created = normalizeNote({ title, body, tagIds: ids, created: Date.now(), updated: Date.now() });
+    const created = normalizeNote({ title, body, tagIds: ids, rating: editorRating, created: Date.now(), updated: Date.now() });
     state.notes.push(created);
     savedId = created.id;
   }
@@ -3614,6 +3676,7 @@ function resetNavigation() {
   selectedId = null;
   viewingId = null;
   currentTags = [];
+  editorRating = 0;
   const s = document.getElementById('search');
   if (s) s.value = '';
   updateSearchClear();
@@ -4241,6 +4304,7 @@ function duplicateNote(noteId) {
     title: (src.title || UNTITLED) + ' (копия)',
     body: src.body || '',
     tagIds: (src.tagIds || []).slice(),
+    rating: clampRating(src.rating),
     created: Date.now(),
     updated: Date.now(),
     pinned: false
@@ -4717,6 +4781,14 @@ function attachEvents() {
   $('btnCancel').addEventListener('click', requestCloseEditor);
   $('btnSave').addEventListener('click', saveNote);
   $('btnDelete').addEventListener('click', () => deleteNote());
+  $('fRating').addEventListener('click', (e) => {
+    const btn = e.target.closest('.star-btn');
+    if (!btn) return;
+    const v = Number(btn.dataset.rating);
+    editorRating = editorRating === v ? 0 : v; // повторный клик сбрасывает оценку
+    renderRatingInput();
+    updateEditorDirtyMark();
+  });
   $('fTitle').addEventListener('input', updateEditorDirtyMark);
   $('fTags').addEventListener('keydown', tagInputKey);
   $('fTags').addEventListener('input', () => { updateTagSuggest(); updateEditorDirtyMark(); });
@@ -4809,6 +4881,7 @@ if (window) {
     state, tagsOf, pathTagsOf, noteBelongsToPath, buildTree,
     applyData, ensureTag, tagName, pruneTagIds, renameTag, deleteTag, invalidateTree,
     isValidData, normalizeNote, renderMarkdown, highlightElement, parseLocalDate, byteLength,
+    clampRating, starsHtml,
     renderAll, renderNotes, renderBreadcrumbs, notesInPath, onSearch, resetNavigation, closeEditor,
     sortNotes, tagCount, tagColor, setTagColor, moveNoteToTag, pushHistory, restoreHistory,
     setSortMode, sortMenu, printNotes, parseQuery, tokenizeQuery, tagToken, matchesSearch, matchesSearchScoped, fuzzyMatch,
@@ -4836,6 +4909,7 @@ if (window) {
     get viewingId() { return viewingId; },
     get editingId() { return editingId; },
     get editorOpen() { return editorOpen; },
+    get editorRating() { return editorRating; },
     get idbMode() { return idbMode; },
     get idbError() { return idbError; },
     get currentPath() { return currentPath; },

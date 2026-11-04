@@ -521,6 +521,66 @@ describe('Интеграция редактора и рендера', () => {
   });
 });
 
+describe('Тэги новой заметки и рейтинг', () => {
+  test('новая заметка в папке создаётся без тэгов', () => {
+    seed([{ id: 't1', name: 'работа' }], [{ id: 'n1', title: 'Старая', tagIds: ['t1'] }]);
+    app.currentPath = ['работа'];
+    app.openEditor();
+    strictEqual(document.querySelectorAll('#tagBadges .tag-badge').length, 0, 'бейджей тэгов нет');
+    document.getElementById('fTitle').value = 'Новая';
+    app.saveNote();
+    const created = app.state.notes.find(n => n.title === 'Новая');
+    ok(created, 'заметка создана');
+    deepEqual(created.tagIds, [], 'тэги папки не унаследованы');
+  });
+
+  test('рейтинг ставится звёздами, сохраняется и рисуется в карточке и просмотре', () => {
+    seed([], [{ id: 'n1', title: 'Заметка', body: '', tagIds: [] }]);
+    app.renderAll();
+    app.openEditor('n1');
+    const btns = [...document.querySelectorAll('#fRating .star-btn')];
+    strictEqual(btns.length, 5, 'пять звёзд в редакторе');
+    btns[3].click(); // четвёртая звезда
+    strictEqual(app.editorRating, 4);
+    strictEqual(app.editorDirty(), true, 'смена рейтинга — это правка');
+    app.saveNote();
+    strictEqual(app.state.notes.find(n => n.id === 'n1').rating, 4);
+    strictEqual(document.querySelectorAll('#notes .note-card .stars .star.on').length, 4);
+    strictEqual(document.querySelectorAll('#noteView .nv-rating .star.on').length, 4);
+  });
+
+  test('повторный клик по той же звезде сбрасывает оценку', () => {
+    seed([], [{ id: 'n1', title: 'Заметка', tagIds: [], rating: 3 }]);
+    app.renderAll();
+    app.openEditor('n1');
+    strictEqual(app.editorRating, 3, 'рейтинг поднят из заметки');
+    document.querySelectorAll('#fRating .star-btn')[2].click();
+    strictEqual(app.editorRating, 0);
+    app.saveNote();
+    strictEqual(app.state.notes.find(n => n.id === 'n1').rating, 0);
+  });
+
+  test('normalizeNote ограничивает рейтинг целым числом 0–5', () => {
+    strictEqual(app.normalizeNote({ rating: 9 }).rating, 5);
+    strictEqual(app.normalizeNote({ rating: -2 }).rating, 0);
+    strictEqual(app.normalizeNote({ rating: '3' }).rating, 3);
+    strictEqual(app.normalizeNote({ rating: 2.6 }).rating, 3);
+    strictEqual(app.normalizeNote({}).rating, 0);
+  });
+
+  test('дублирование копирует рейтинг', () => {
+    seed([], [{ id: 'n1', title: 'Заметка', tagIds: [], rating: 4 }]);
+    const copy = app.duplicateNote('n1');
+    strictEqual(copy.rating, 4);
+  });
+
+  test('без оценки звёзды в карточке не показываются', () => {
+    seed([], [{ id: 'n1', title: 'Заметка', tagIds: [] }]);
+    app.renderAll();
+    strictEqual(document.querySelectorAll('#notes .note-card .stars').length, 0);
+  });
+});
+
 describe('Рендер: делегирование и инкрементальное дерево', () => {
   function seedTree() {
     seed(
