@@ -672,14 +672,57 @@ const IDB_VERSION = 1;
 const HEAVY_KEYS = [LS_KEY, LS_KEY + '_backup', SNAPSHOT_KEY, TRASH_KEY];
 const heavyKeySet = new Set(HEAVY_KEYS);
 
+const IDB_INIT_TIMEOUT = 3000;  // мс на открытие базы, дальше — фолбэк на localStorage
+const IDB_RETRY_MAX = 3;        // повторов записи перед предупреждением
+const IDB_RETRY_DELAY = 120;    // базовая пауза между повторами (растёт вдвое)
+const SETTINGS_DEBOUNCE = 250;  // мс: склеиваем частые записи настроек
+
 let storageAvailable = true;   // доступен ли localStorage (для настроек)
 let idbMode = false;           // тяжёлые данные хранятся в IndexedDB
 let idbError = '';             // последняя ошибка IndexedDB (для диагностики)
 let idbDB = null;              // открытое соединение
+let idbAbandoned = false;      // открытие не уложилось в таймаут — соединение закрываем
 let storageWarned = false;     // предупреждение о сбое записи — один раз
 const memStore = Object.create(null); // синхронный кэш тяжёлых ключей
 const idbDirty = new Set();    // ключи, ожидающие записи
 const idbWriting = new Set();  // ключи, которые пишутся прямо сейчас
+const idbRetries = new Map();  // ключ -> число уже сделанных повторов
+let idbRetryPending = 0;       // запланированные повторы (чтобы idbIdle не висел)
+let quotaRelieved = false;     // о нехватке места предупреждаем один раз
+let quotaReliefActive = false; // защита от рекурсии при освобождении места
+let lastRecovery = '';         // откуда подняли данные при загрузке: backup|snapshot
+// Отложенные записи настроек: частые вызовы склеиваются в одну запись.
+const deferredSettings = new Map(); // ключ -> { value, timer }
+
+function isQuotaError(err) {
+  if (!err) return false;
+  if (err.name === 'QuotaExceededError' || err.code === 22) return true;
+  return /quota|storage full|exceeded/i.test(String(err.message || ''));
+}
+// Освободить место: сначала старые снимки, затем старую половину корзины.
+// Возвращает true, если что-то удалось освободить.
+function relieveQuota() {
+  if (quotaReliefActive) return false;
+  quotaReliefActive = true;
+  try {
+    const snaps = loadSnapshots();
+    if (snaps.length > 1) {
+      saveSnapshots(snaps.slice(0, Math.max(1, Math.floor(snaps.length / 2))));
+      return true;
+    }
+    const trash = loadTrash();
+    if (trash.length > 1) {
+      saveTrash(trash.slice(0, Math.max(1, Math.floor(trash.length / 2))));
+      return true;
+    }
+    return false;
+  } finally { quotaReliefActive = false; }
+}
+function notifyQuota() {
+  if (quotaRelieved) return;
+  quotaRelieved = true;
+  notify('⚠️ В хранилище мало места — старые снимки удалены. Сделайте экспорт (JSON).');
+}
 
 function storageGet(key) {
   // Тяжёлые ключи в режиме IndexedDB читаются из памяти: синхронно и без базы.
@@ -699,7 +742,45 @@ function storageSet(key, value) {
   try {
     if (typeof localStorage === 'undefined') throw new Error('no ls');
     localStorage.setItem(key, value);
-  } catch (e) { storageAvailable = false; memStore[key] = value; }
+  } catch (e) {
+    // Переполнение localStorage: освобождаем место и пробуем ещё раз.
+    if (isQuotaError(e) && relieveQuota()) {
+      try { localStorage.setItem(key, value); return; } catch (e2) { e = e2; }
+    }
+    storageAvailable = false; memStore[key] = value;
+  }
+}
+
+// ---------- Отложенная запись настроек ----------
+// Навигация и сворачивание дерева пишут крошечные ключи очень часто; при
+// быстрых кликах достаточно одной записи. pagehide/visibilitychange сбрасывают
+// очередь принудительно.
+function deferSetting(key, value) {
+  const prev = deferredSettings.get(key);
+  if (prev) clearTimeout(prev.timer);
+  const entry = { value, timer: null };
+  entry.timer = setTimeout(() => {
+    deferredSettings.delete(key);
+    try { storageSet(key, entry.value); } catch (e) { /* ignore */ }
+  }, SETTINGS_DEBOUNCE);
+  deferredSettings.set(key, entry);
+}
+function cancelDeferredSetting(key) {
+  const entry = deferredSettings.get(key);
+  if (!entry) return;
+  clearTimeout(entry.timer);
+  deferredSettings.delete(key);
+}
+function flushDeferredSettings() {
+  deferredSettings.forEach((entry, key) => {
+    clearTimeout(entry.timer);
+    try { storageSet(key, entry.value); } catch (e) { /* ignore */ }
+  });
+  deferredSettings.clear();
+}
+function cancelDeferredSettings() {
+  deferredSettings.forEach(entry => clearTimeout(entry.timer));
+  deferredSettings.clear();
 }
 
 // ---------- IndexedDB: тяжёлые данные ----------
@@ -723,9 +804,37 @@ function openIdb() {
         if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
       } catch (e) { /* ниже сработает onerror */ }
     };
-    req.onsuccess = () => { idbDB = req.result; resolve(idbDB); };
+    req.onsuccess = () => {
+      const db = req.result;
+      // Инициализация уже сдалась по таймауту — соединение не нужно.
+      if (idbAbandoned) { try { db.close(); } catch (e) {} reject(new Error('инициализация отменена')); return; }
+      idbDB = db;
+      resolve(db);
+    };
     req.onerror = () => reject(req.error || new Error('не удалось открыть базу'));
     req.onblocked = () => reject(new Error('база занята другой вкладкой'));
+  });
+}
+// Не ждать IndexedDB бесконечно: иначе при зависшем open() экран останется пустым.
+function withTimeout(promise, ms, message) {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      reject(new Error(message || 'таймаут'));
+    }, ms);
+    promise.then(value => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve(value);
+    }, err => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      reject(err);
+    });
   });
 }
 function idbGetAll(keys) {
@@ -760,6 +869,17 @@ function queueIdbWrite(key) {
   idbDirty.add(key);
   flushIdbKey(key);
 }
+function scheduleIdbRetry(key) {
+  const tries = idbRetries.get(key) || 0;
+  if (tries >= IDB_RETRY_MAX) return false;
+  idbRetries.set(key, tries + 1);
+  idbRetryPending++;
+  setTimeout(() => {
+    idbRetryPending--;
+    if (idbDirty.has(key)) flushIdbKey(key);
+  }, IDB_RETRY_DELAY * Math.pow(2, tries));
+  return true;
+}
 function flushIdbKey(key) {
   if (!idbMode || idbWriting.has(key) || !idbDirty.has(key)) return;
   idbDirty.delete(key);
@@ -767,10 +887,17 @@ function flushIdbKey(key) {
   const value = (key in memStore) ? memStore[key] : null;
   idbPut(key, value).then(() => {
     idbWriting.delete(key);
+    idbRetries.delete(key);
     if (idbDirty.has(key)) flushIdbKey(key);
   }, err => {
     idbWriting.delete(key);
-    notifyStorageFailure(err);
+    // Ключ возвращаем в очередь: данные ещё не в базе, повторяем позже.
+    idbDirty.add(key);
+    if (isQuotaError(err)) {
+      // Не хватает места — освобождаем снимки/корзину и пробуем снова.
+      if (relieveQuota()) notifyQuota();
+    }
+    if (!scheduleIdbRetry(key)) notifyStorageFailure(err);
   });
 }
 // Дописать всё, что не успело уйти в базу (перед скрытием/закрытием вкладки).
@@ -781,7 +908,10 @@ function flushIdbWrites() {
 // Дождаться, пока очередь записи опустеет (тесты и аккуратное закрытие).
 function idbIdle() {
   return new Promise(resolve => {
-    const check = () => { if (idbWriting.size === 0 && idbDirty.size === 0) resolve(); else setTimeout(check, 5); };
+    const check = () => {
+      if (idbWriting.size === 0 && idbRetryPending === 0) resolve();
+      else setTimeout(check, 5);
+    };
     check();
   });
 }
@@ -790,12 +920,13 @@ function idbIdle() {
 async function storageInit() {
   if (typeof indexedDB === 'undefined' || !indexedDB) return false;
   try {
-    const values = await idbGetAll(HEAVY_KEYS);
+    const values = await withTimeout(idbGetAll(HEAVY_KEYS), IDB_INIT_TIMEOUT, 'IndexedDB не открылась за ' + IDB_INIT_TIMEOUT + ' мс');
     idbMode = true;
     Object.keys(values).forEach(k => { memStore[k] = values[k]; });
     await migrateLsToIdb(values);
     return true;
   } catch (e) {
+    idbAbandoned = true;
     if (idbDB) { try { idbDB.close(); } catch (e2) {} }
     idbMode = false;
     idbDB = null;
@@ -829,9 +960,19 @@ function storageClearMemory() {
   Object.keys(memStore).forEach(k => { delete memStore[k]; });
   idbDirty.clear();
   idbWriting.clear();
+  idbRetries.clear();
+  idbRetryPending = 0;
+  snapshotCache = null;
+  trashCache = null;
+  lastViewJSON = null;
+  lastCollapsedJSON = null;
+  lastRecovery = '';
+  quotaRelieved = false;
+  cancelDeferredSettings();
   if (idbDB) { try { idbDB.close(); } catch (e) {} }
   idbDB = null;
   idbMode = false;
+  idbAbandoned = false;
   idbError = '';
   storageWarned = false;
 }
@@ -972,15 +1113,32 @@ function applyData(data) {
   return notes.filter(n => !isEmptyNote(n));
 }
 
+// Разобрать сохранённые данные. Возвращает объект данных или null, если строка
+// пустая, битая или не похожа на архив (тогда loadState попробует резерв).
+function parseStoredState(raw) {
+  if (raw === null || raw === '' || raw === undefined) return null;
+  let data;
+  try { data = JSON.parse(raw); } catch (e) { return null; }
+  return isValidData(data) ? data : null;
+}
+
 function loadState() {
   const raw = storageGet(LS_KEY);
   const hasData = raw !== null && raw !== '';
-  if (hasData) {
-    try { const data = JSON.parse(raw); state.notes = applyData(data); }
-    catch (e) { state.notes = applyData([]); state.tags = []; rebuildTagIndex(); }
-  } else {
-    state.notes = applyData([]);
+  let data = parseStoredState(raw);
+  lastRecovery = '';
+  // Основной ключ повреждён — поднимаем данные из резервной копии, затем из
+  // последнего снимка. Без этого битый JSON молча обнулял весь архив.
+  if (hasData && !data) {
+    const backup = parseStoredState(storageGet(LS_KEY + '_backup'));
+    if (backup) { data = backup; lastRecovery = 'backup'; }
+    else {
+      const snaps = loadSnapshots();
+      const first = snaps.length ? snaps[0] : null;
+      if (first && first.data && isValidData(first.data)) { data = first.data; lastRecovery = 'snapshot'; }
+    }
   }
+  state.notes = applyData(data || []);
   state.notes = state.notes.filter(n => !isEmptyNote(n));
   // Снимок состояния при загрузке страницы -> в резервный ключ localStorage.
   // Позволяет восстановить данные, если их перезапишет импорт/сбой (без консоли).
@@ -999,6 +1157,10 @@ function loadState() {
     notify('⚠️ Хранилище заблокировано — изменения не сохранятся после обновления.' + (isFile ? ' Откройте через локальный сервер (http://localhost).' : ' Нажмите ℹ️ для диагностики.'));
   } else if (!storageAvailable && idbMode) {
     notify('⚠️ Заметки сохраняются в базе браузера, но настройки (тема, свёрнутые папки) — нет: localStorage заблокирован.');
+  } else if (lastRecovery) {
+    // Сообщаем после предупреждений о хранилище: это самое важное сообщение.
+    const src = lastRecovery === 'backup' ? 'резервной копии' : 'последнего снимка';
+    notify('⚠️ Данные были повреждены — восстановлено из ' + src + ' (' + state.notes.length + ' заметок).');
   }
 }
 // Сохранить и заметки, и таблицу тэгов (версия 2).
@@ -1007,24 +1169,43 @@ function saveState() {
   maybeSnapshot(); // снимок при изменении состава заметок (остальные вызовы — no-op)
 }
 function saveTheme() { storageSet(THEME_KEY, state.theme); }
-function saveCollapsed() { storageSet(COLLAPSE_KEY, JSON.stringify([...collapsed])); }
+// Последнее записанное значение свёрнутости (чтобы не писать одно и то же).
+let lastCollapsedJSON = null;
+function saveCollapsed(immediate) {
+  const json = JSON.stringify([...collapsed]);
+  if (json === lastCollapsedJSON) return;
+  lastCollapsedJSON = json;
+  if (immediate) {
+    cancelDeferredSetting(COLLAPSE_KEY);
+    try { storageSet(COLLAPSE_KEY, json); } catch (e) { /* ignore */ }
+    return;
+  }
+  deferSetting(COLLAPSE_KEY, json);
+}
 
 // ---------- Версионные снимки архива (ротация в localStorage) ----------
 // Список снимков: [{ ts, count, data: {tags, notes} }], не старше SNAPSHOT_MAX.
+// Держим его в памяти: maybeSnapshot вызывается на каждое сохранение, и парсить
+// до пяти полных копий архива каждый раз слишком дорого.
+let snapshotCache = null;
 function loadSnapshots() {
+  if (snapshotCache) return snapshotCache;
   try {
     const raw = storageGet(SNAPSHOT_KEY);
     const arr = raw ? JSON.parse(raw) : [];
-    return Array.isArray(arr) ? arr : [];
-  } catch (e) { return []; }
+    snapshotCache = Array.isArray(arr) ? arr : [];
+  } catch (e) { snapshotCache = []; }
+  return snapshotCache;
 }
 function saveSnapshots(list) {
-  storageSet(SNAPSHOT_KEY, JSON.stringify(list.slice(0, SNAPSHOT_MAX)));
+  const trimmed = list.slice(0, SNAPSHOT_MAX);
+  snapshotCache = trimmed;
+  storageSet(SNAPSHOT_KEY, JSON.stringify(trimmed));
 }
 // Сделать снимок текущего состояния, если состав заметок изменился с прошлого снимка.
 function maybeSnapshot(force) {
   if (state.notes.length === 0) return false;
-  const list = loadSnapshots();
+  const list = loadSnapshots(); // из кэша: без JSON.parse
   const signature = state.notes.length + ':' + state.notes.map(n => n.id).sort().join(',');
   const lastSig = list.length ? list[0].sig : null;
   if (!force && signature === lastSig) return false;
@@ -1056,11 +1237,22 @@ function restoreSnapshot(index) {
 }
 
 // ---------- Корзина удалённых заметок ----------
+// Кэш в памяти: moveToTrash/trashMenu читают корзину часто, а JSON.parse
+// двадцати полных заметок при каждом удалении не нужен.
+let trashCache = null;
 function loadTrash() {
-  try { const a = JSON.parse(storageGet(TRASH_KEY) || '[]'); return Array.isArray(a) ? a : []; }
-  catch (e) { return []; }
+  if (trashCache) return trashCache;
+  try {
+    const a = JSON.parse(storageGet(TRASH_KEY) || '[]');
+    trashCache = Array.isArray(a) ? a : [];
+  } catch (e) { trashCache = []; }
+  return trashCache;
 }
-function saveTrash(list) { storageSet(TRASH_KEY, JSON.stringify(list.slice(0, TRASH_MAX))); }
+function saveTrash(list) {
+  const trimmed = list.slice(0, TRASH_MAX);
+  trashCache = trimmed;
+  storageSet(TRASH_KEY, JSON.stringify(trimmed));
+}
 // Убрать заметку в корзину (перед удалением из state.notes).
 function moveToTrash(n) {
   const t = loadTrash();
@@ -2051,15 +2243,19 @@ function renderAll(opts) {
 }
 
 // Запомнить текущее место (путь + поисковый запрос) для восстановления при перезагрузке.
-// Пишем только при изменении, чтобы не трогать localStorage на каждый рендер.
+// Пишем только при изменении и с небольшой задержкой: при быстрых переходах
+// достаточно одной записи, а pagehide сбрасывает очередь принудительно.
 let lastViewJSON = null;
-function saveLastView() {
+function saveLastView(immediate) {
   const json = JSON.stringify({ path: currentPath, q: searchQuery || '' });
   if (json === lastViewJSON) return;
-  try {
-    storageSet(VIEW_KEY, json);
-    lastViewJSON = json;
-  } catch (e) { /* ignore */ }
+  lastViewJSON = json;
+  if (immediate) {
+    cancelDeferredSetting(VIEW_KEY);
+    try { storageSet(VIEW_KEY, json); } catch (e) { /* ignore */ }
+    return;
+  }
+  deferSetting(VIEW_KEY, json);
 }
 // Восстановить последнее место; вызывается один раз при старте.
 function restoreLastView() {
@@ -2958,37 +3154,52 @@ async function chooseFile() {
   exportData();
 }
 // Автосохранение в привязанный локальный файл.
-async function saveToFile() {
-  if (!fileHandle) return;
+// Записи идут строго по очереди: два параллельных saveToFile() иначе могли бы
+// чередовать createWritable/close и оставить в файле «смесь» состояний.
+let fileWriteChain = Promise.resolve();
+// Глубокий снимок состояния для поля backup (без ссылок на живые объекты).
+function cloneStateSnapshot() {
+  return {
+    tags: state.tags.map(t => ({ ...t })),
+    notes: state.notes.map(n => ({
+      ...n,
+      tagIds: n.tagIds ? n.tagIds.slice() : [],
+      history: Array.isArray(n.history) ? n.history.map(h => ({ ...h })) : []
+    }))
+  };
+}
+function saveToFile() {
+  if (!fileHandle) return fileWriteChain;
+  const handle = fileHandle;
+  // payload и снимок состояния готовим синхронно, до первого await: иначе за
+  // время записи state успеет измениться и в файл уйдёт другое состояние.
+  const payload = JSON.stringify(serializeData(), null, 2);
+  const savedState = cloneStateSnapshot();
+  const task = fileWriteChain.then(() => writeToFileHandle(handle, payload, savedState));
+  fileWriteChain = task.catch(() => {}); // ошибки обработаны внутри
+  return task;
+}
+async function writeToFileHandle(handle, payload, savedState) {
   try {
-    const payload = JSON.stringify(serializeData(), null, 2);
-    const writable = await fileHandle.createWritable();
+    const writable = await handle.createWritable();
     await writable.write(payload);
     await writable.close();
     // Метка последней записи — для обнаружения внешних изменений файла.
     lastFileWriteTs = Date.now();
     lastWrittenSize = byteLength(payload);
-    // Запоминаем только что сохранённое состояние как резервное для следующего раза.
-    // Глубокое клонирование, чтобы последующие мутации state не меняли снимок.
-    lastSavedState = {
-      tags: state.tags.map(t => ({ ...t })),
-      notes: state.notes.map(n => ({
-        ...n,
-        tagIds: n.tagIds ? n.tagIds.slice() : [],
-        history: Array.isArray(n.history) ? n.history.map(h => ({ ...h })) : []
-      }))
-    };
+    // Резервная копия — ровно то состояние, которое только что ушло в файл.
+    lastSavedState = savedState;
   } catch (err) {
     const msg = err && err.message ? String(err.message) : '';
     // Файл мог быть перемещён/удалён/потеряно разрешение — привязка недействительна.
     const detached = /NotAllowedError|NotFoundError|Failed to execute|createWritable|permission/i.test(msg);
-    if (detached) {
+    if (detached && fileHandle === handle) {
       fileHandle = null;
       destroyFileHandle();
       notify('⚠️ Файл недоступен (перемещён/удалён). Привяжите файл заново.');
       const ok = await dialogConfirm('Файл данных недоступен. Перепривязать файл?');
       if (ok) chooseFile();
-    } else {
+    } else if (!detached) {
       notify('⚠️ Не удалось сохранить в файл: ' + msg);
     }
   }
@@ -3005,7 +3216,7 @@ function resetNavigation() {
   currentTags = [];
   const s = document.getElementById('search');
   if (s) s.value = '';
-  saveCollapsed();
+  saveCollapsed(true);
 }
 
 // Размер в человекочитаемом виде (для диагностики).
@@ -3047,7 +3258,12 @@ function storageProbe() {
   }
   const hasHandle = !!fileHandle;
   const fname = storageGet(FILE_NAME_KEY) || '';
-  return { isFile, lsOk, lsErr, savedCount, backupCount, hasHandle, fname, inMemory: state.notes.length, idbMode, idbError };
+  // Ключи, которые ещё не дошли до базы (ошибка/переполнение/ожидание повтора).
+  const unsaved = idbDirty.size;
+  return {
+    isFile, lsOk, lsErr, savedCount, backupCount, hasHandle, fname,
+    inMemory: state.notes.length, idbMode, idbError, unsaved, recovered: lastRecovery
+  };
 }
 // Показать отчёт о состоянии хранилища в модальном окне (без консоли браузера).
 async function showDiagnostics() {
@@ -3064,9 +3280,15 @@ async function showDiagnostics() {
       const est = await navigator.storage.estimate();
       if (est && est.quota) lines.push('Занято в браузере: ' + fmtSize(est.usage) + ' из ' + fmtSize(est.quota));
     }
+    if (navigator.storage && navigator.storage.persisted) {
+      const persisted = await navigator.storage.persisted();
+      lines.push('Постоянное хранилище: ' + (persisted ? 'да ✅ (браузер не вытеснит данные)' : 'нет — данные могут быть вытеснены при нехватке места'));
+    }
   } catch (e) { /* квота недоступна — не критично */ }
   lines.push('Сохранено в браузере: ' + (p.savedCount === -1 ? 'данные повреждены' : p.savedCount + ' заметок'));
   lines.push('Резервная копия в браузере: ' + (p.backupCount === -1 ? 'повреждена' : p.backupCount + ' заметок'));
+  if (p.unsaved > 0) lines.push('Не сохранено в базу: ' + p.unsaved + ' (повтор выполняется автоматически)');
+  if (p.recovered) lines.push('Восстановлено при загрузке из: ' + (p.recovered === 'backup' ? 'резервной копии' : 'последнего снимка'));
   lines.push('Привязанный файл: ' + (p.hasHandle ? 'да' + (p.fname ? ' (' + p.fname + ')' : '') : 'нет'));
   lines.push('Заметок в текущей сессии: ' + p.inMemory);
   lines.push('');
@@ -3923,10 +4145,11 @@ window.addEventListener('error', function (ev) {
 // Единая точка подключения обработчиков событий (вместо инлайн-атрибутов).
 function attachEvents() {
   const $ = id => document.getElementById(id);
-  // Дописать отложенные записи в IndexedDB перед закрытием/скрытием вкладки.
-  window.addEventListener('pagehide', flushIdbWrites);
+  // Дописать отложенные записи настроек и IndexedDB перед закрытием/скрытием вкладки.
+  const flushPending = () => { flushDeferredSettings(); flushIdbWrites(); };
+  window.addEventListener('pagehide', flushPending);
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'hidden') flushIdbWrites();
+    if (document.visibilityState === 'hidden') flushPending();
   });
   $('burgerBtn').addEventListener('click', toggleSidebar);
   $('fileBtn').addEventListener('click', chooseFile);
@@ -4086,6 +4309,12 @@ function attachEvents() {
   // клик по маске (позади модалки) закрывает редактор
   $('modalMask').addEventListener('click', e => { if (e.target === e.currentTarget) requestCloseEditor(); });
 }
+// Попросить браузер не вытеснять данные при нехватке места (если поддерживается).
+function requestPersistentStorage() {
+  try {
+    if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
+  } catch (e) { /* нет API — не критично */ }
+}
 // Обычный старт после подготовки хранилища.
 function startApp() {
   loadState();
@@ -4094,6 +4323,7 @@ function startApp() {
   renderAll();
   renderFacets();
   renderViews();
+  requestPersistentStorage();
   restoreFileHandle(); // восстановить привязку файла (асинхронно, если была)
 }
 try {
@@ -4124,6 +4354,7 @@ if (window) {
     updateSearchSuggest, applySearchSuggest, getParsedQuery, tagCounts, notesInFolder, submenuFor,
     closeSidebar, toggleSidebar, storageProbe, showDiagnostics, restoreFromBackup,
     storageGet, storageSet, storageInit, storageClearMemory, flushIdbWrites, idbIdle, fmtSize,
+    flushDeferredSettings, parseStoredState, relieveQuota, withTimeout,
     loadState, saveState,
     mergeTags, openTagManager, closeTagManager, renderTagManager, tagManagerRename, tagManagerMerge, tagManagerDelete, tagManagerColor,
     updateTagSuggest, hideTagSuggest, applyTagSuggest,

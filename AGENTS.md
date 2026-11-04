@@ -29,7 +29,7 @@
 
 | Секция | Ключевые функции |
 |---|---|
-| Persistence | `storageGet/storageSet`, `memStore`, `HEAVY_KEYS`, `storageInit`, `openIdb/idbGetAll/idbPut`, `queueIdbWrite/flushIdbWrites/idbIdle`, `migrateLsToIdb`, `storageClearMemory`, константы ключей, `loadState/saveState/saveTheme/saveCollapsed` |
+| Persistence | `storageGet/storageSet`, `memStore`, `HEAVY_KEYS`, `storageInit`, `openIdb/idbGetAll/idbPut`, `queueIdbWrite/flushIdbWrites/idbIdle`, `migrateLsToIdb`, `storageClearMemory`, `parseStoredState`, `isQuotaError/relieveQuota/notifyQuota`, `deferSetting/flushDeferredSettings`, `withTimeout`, `requestPersistentStorage`, константы ключей, `loadState/saveState/saveTheme/saveCollapsed` |
 | Таблица тэгов | `rebuildTagIndex`, `tagColorMap`, `ensureTag`, `tagName`, `getTagByName`, `sameName`, `pruneTagIds`, `normalizeNote`, `isEmptyNote`, `isValidData`, `applyData` |
 | Версионные снимки | `loadSnapshots/saveSnapshots/maybeSnapshot/restoreSnapshot/snapshotMenu` |
 | Корзина | `loadTrash/saveTrash/moveToTrash/restoreFromTrash/emptyTrash/trashMenu` |
@@ -108,12 +108,15 @@ state.tags = [{ id: 't…', name: 'работа', color?: '#8b5cf6' }]
 | IndexedDB `noteTreeFileHandle` | IDB | дескриптор файла (File System Access API) |
 
 - **`HEAVY_KEYS`** (`noteTreeData_v1`, `..._backup`, `noteTreeSnapshots`, `noteTreeTrash`) — единственный список того, что живёт в базе `noteTreeDB` / store `kv`. Добавляя новый тяжёлый ключ, добавьте его сюда.
-- `storageInit()`: открывает базу, одним чтением поднимает `HEAVY_KEYS` в `memStore`, затем `migrateLsToIdb()` переносит старые значения из `localStorage` и удаляет LS-копию **только после подтверждённой записи**. Если IndexedDB недоступна — `idbMode = false`, всё работает по-старому через `localStorage`.
-- `storageSet()` для тяжёлого ключа в режиме базы пишет в `memStore` сразу и ставит ключ в очередь `queueIdbWrite()`. По ключу одновременно идёт не больше одной транзакции, промежуточные значения схлопываются; сбой записи — один тост за сессию (`notifyStorageFailure`). `flushIdbWrites()` вызывается на `pagehide`/`visibilitychange`.
-- `loadState()`: читает данные → `applyData` → пишет backup-ключ (`>0` заметок) → `maybeSnapshot()` → тема → режим сортировки → свёрнутые папки → `applyTheme()`. Если недоступно всё (`!storageAvailable && !idbMode`) — предупреждение через `notify`; если работает только база — предупреждение лишь про настройки.
+- `storageInit()`: открывает базу, одним чтением поднимает `HEAVY_KEYS` в `memStore`, затем `migrateLsToIdb()` переносит старые значения из `localStorage` и удаляет LS-копию **только после подтверждённой записи**. Если IndexedDB недоступна — `idbMode = false`, всё работает по-старому через `localStorage`. Открытие ограничено `IDB_INIT_TIMEOUT` (3 с, `withTimeout`): зависший `open()` не оставляет приложение с пустым экраном, а позднее соединение закрывается (`idbAbandoned`).
+- `storageSet()` для тяжёлого ключа в режиме базы пишет в `memStore` сразу и ставит ключ в очередь `queueIdbWrite()`. По ключу одновременно идёт не больше одной транзакции, промежуточные значения схлопываются. При сбое ключ **возвращается в очередь** (`idbDirty`) и повторяется до `IDB_RETRY_MAX` (3) раз с растущей паузой; только после этого — один тост за сессию (`notifyStorageFailure`). `flushIdbWrites()` вызывается на `pagehide`/`visibilitychange` и пытается дописать всё немедленно.
+- Переполнение (`QuotaExceededError`, `relieveQuota()`): сначала удаляется половина старых снимков, затем половина корзины, запись повторяется; пользователю один раз показывается совет про экспорт. Работает и для `localStorage`-режима, и для IndexedDB.
+- `loadState()`: `parseStoredState()` → при повреждённом JSON данные поднимаются из `noteTreeData_v1_backup`, затем из последнего снимка (`lastRecovery` = `backup`/`snapshot`, виден в диагностике и в тосте) → `applyData` → backup-ключ (`>0` заметок) → `maybeSnapshot()` → тема → режим сортировки → свёрнутые папки → `applyTheme()`. Если недоступно всё (`!storageAvailable && !idbMode`) — предупреждение через `notify`; если работает только база — предупреждение лишь про настройки.
 - `saveState()` пишет `{ version: 2, tags, notes }` и вызывает `maybeSnapshot()`.
-- Снимки (`maybeSnapshot`) создаются при **изменении состава заметок** (сигнатура `count:ids`), а не при каждом редактировании текста. Восстановление — «🕘» (`snapshotMenu`).
-- Диагностика: `storageProbe()` возвращает `idbMode`/`idbError`, `showDiagnostics()` добавляет `navigator.storage.estimate()` (работает и на `file://`).
+- Снимки (`maybeSnapshot`) создаются при **изменении состава заметок** (сигнатура `count:ids`), а не при каждом редактировании текста. Список снимков держится в памяти (`snapshotCache`), поэтому `saveState()` не парсит до пяти полных копий архива на каждое сохранение. Восстановление — «🕘» (`snapshotMenu`).
+- Корзина тоже кэшируется в памяти (`trashCache`); `saveTrash()` пишет через кэш и обрезает до `TRASH_MAX`.
+- Настройки (`saveLastView`, `saveCollapsed`) пишутся с задержкой `SETTINGS_DEBOUNCE` (250 мс): при быстрых переходах/сворачиваниях остаётся одна запись. Очередь сбрасывается на `pagehide`/`visibilitychange` (`flushDeferredSettings`), отменяется в `storageClearMemory`. `resetNavigation()` пишет свёрнутость сразу (`saveCollapsed(true)`).
+- Диагностика: `storageProbe()` возвращает `idbMode`/`idbError`, `unsaved` (ключи, не дошедшие до базы) и `recovered`; `showDiagnostics()` добавляет `navigator.storage.estimate()`, `navigator.storage.persisted()` (работает и на `file://`) и строку о несохранённых ключах. `requestPersistentStorage()` при старте просит браузер не вытеснять данные.
 - **`file://`-особенность (проверено в Chromium):** хранилище привязано к **папке** с HTML, а не к файлу. Тот же профиль, файл в другой папке → данных нет; другое имя в той же папке → данные есть. OPFS на `file://` заблокирован (`SecurityError`), IndexedDB работает и переживает перезапуск. Перенос между машинами — только через экспорт JSON или привязанный файл.
 
 ## Тэги и дерево (ядро логики)
@@ -153,7 +156,7 @@ renderAll(opts) → renderTree() + renderBreadcrumbs() + renderNotes() + renderN
 - **Список**: при непустом `searchQuery` — глобальный поиск по всем заметкам, иначе — `notesInPath()`. Затем `sortNotes()` и закреплённые (`pinned`) наверх. Карточка `.note-card`: заголовок, превью (`previewText` → Markdown, обрезка 140 символов + `…`; строки таблиц выкидываются — в 96px они нечитаемы), кликабельные тэги, человекочитаемая дата; drag-and-drop в папку (`text/note-id`); `tabIndex` и клавиатурная навигация.
 - Пустые состояния: «Ничего не найдено», «В этой папке пока нет заметок», а при полностью пустом архиве — экран переноса с кнопкой «📂 Открыть файл данных».
 - `humanDate`: «только что», «N мин назад», «сегодня, ЧЧ:ММ», «вчера, ЧЧ:ММ», затем дата (`12 окт` / с годом).
-- `saveLastView()` пишет в `localStorage` только при изменении пути/запроса.
+- `saveLastView()` пишет в `localStorage` только при изменении пути/запроса и с задержкой 250 мс (`deferSetting`); очередь сбрасывается на `pagehide`/`visibilitychange`, поэтому при закрытии вкладки место всё равно сохраняется.
 
 ## Поиск
 
@@ -226,10 +229,10 @@ renderAll(opts) → renderTree() + renderBreadcrumbs() + renderNotes() + renderN
 - `exportData()` скачивает `tag-tree.json`; `exportMd`/`exportTxt` — `заметки.md`/`заметки.txt`; `exportFound()` — только текущий фильтр/папку; `notesInFolder(path)` — заметки конкретной ветки (для экспорта/печати папки из контекстного меню, без учёта глобального поиска); `printNotes` — печать/PDF через `#printArea` и `window.print()` (без библиотек).
 - Импорт (`#fileInput`): JSON → `isValidData` → подтверждение с числом записей → `state.notes = applyData(data)` → `resetNavigation()` → `saveState()` → `saveToFile()` → `renderAll()`.
 - `chooseFile()`: `showSaveFilePicker` → дескриптор в `fileHandle`, сохранение в IndexedDB, автосохранение; без API — обычный экспорт.
-- `saveToFile()` пишет JSON в привязанный файл; запоминает `lastFileWriteTs` и `lastWrittenSize` (в **байтах**, `byteLength`). При `NotAllowedError`/`NotFoundError`/потере разрешения сбрасывает привязку и предлагает выбрать файл заново.
+- `saveToFile()` пишет JSON в привязанный файл; запоминает `lastFileWriteTs` и `lastWrittenSize` (в **байтах**, `byteLength`). Записи идут строго по очереди (`fileWriteChain`), а `payload` и снимок состояния (`cloneStateSnapshot`) готовятся **синхронно до первого `await`** — иначе два быстрых сохранения могли бы перемешать состояния, а `backup` в файле относился бы к уже изменённым данным. При `NotAllowedError`/`NotFoundError`/потере разрешения сбрасывает привязку и предлагает выбрать файл заново (только если привязка всё ещё указывает на тот же дескриптор).
 - `checkFileConflict()` на `visibilitychange`: если файл изменён извне (`lastModified` новее записи и размер другой) — предлагает перечитать.
 - Привязка файла восстанавливается через IndexedDB (`restoreFileHandle`), но не гарантируется после перезагрузки; без IndexedDB — привязка только на сессию.
-- Диагностика без консоли: «ℹ️» → `storageProbe()`/`showDiagnostics()` (режим открытия, доступность localStorage, режим IndexedDB и квота браузера, число заметок, backup, привязанный файл).
+- Диагностика без консоли: «ℹ️» → `storageProbe()`/`showDiagnostics()` (режим открытия, доступность localStorage, режим IndexedDB и квота браузера, постоянное хранилище, число заметок, backup, несохранённые ключи, факт восстановления из резерва, привязанный файл).
 
 ## Тема, уведомления, мобильное, клавиши
 
@@ -260,7 +263,7 @@ renderAll(opts) → renderTree() + renderBreadcrumbs() + renderNotes() + renderN
 node tests/run_test.js tests/note_tree.test.js
 ```
 
-или `cd tests && npm test`. Сейчас: **66 тестов, все проходят**.
+или `cd tests && npm test`. Сейчас: **75 тестов, все проходят**.
 
 - `tests/run_test.js` загружает `tag-tree.html` в jsdom (инлайновый `<script>` выполняется целиком) и выставляет глобальные `describe/test/it/beforeEach/afterEach`, `assert` (Node `assert`, **не** strict), `app` (= `window.__app`), `resetApp()`, `window`, `document`.
 - `beforeEach`/`afterEach` на верхнем уровне — глобальные (для всех тестов), внутри `describe` — локальные. В тестах зарегистрирован `beforeEach(resetApp)`.
@@ -270,7 +273,7 @@ node tests/run_test.js tests/note_tree.test.js
 - jsdom установлен один раз в `tests/node_modules`; не переустанавливать и не удалять.
 - Тесты опираются на `window.__app` — при переименовании/переносе функций синхронизируйте список экспорта.
 
-Что покрыто: дерево по перестановкам и счётчики, корневые заметки, `noteBelongsToPath`, `MAX_PERM_TAGS`; миграция старого формата, дедупликация тэгов и перенаправление ссылок, отбрасывание пустых, `isValidData`; разбор запроса (`#тэг`, `-тэг`, `title:`, `since/until` с пробелом), `matchesSearch`; Markdown (списки/чекбоксы, таблицы внутри кода, обёртка таблиц для прокрутки, пустые строки-разделители абзацев, XSS, схемы ссылок); превью карточек без таблиц; подсветка поиска; `restoreLastView` (многосегментный путь); `moveNoteToTag`, `cycleFacet`, `renameTag`; корзина/undo, меню «Версии данных» (открытие и переключение); `byteLength`; доступность фасетов; интеграция редактора (`openEditor`, `saveNote`, рендер с подсветкой); делегирование событий карточек и дерева, инкрементальное дерево (тот же DOM при клике, кэш детей), стартовое сворачивание дерева и сохранённая свёрнутость, `renderAll({ tree:false })`, инвалидация кэшей (`tagsLowerOf`, термы подсветки), `saveLastView` без лишних записей, отложенный предпросмотр; слой хранения — `storageInit` без IndexedDB, миграция localStorage→IndexedDB, отсутствие тяжёлых ключей в localStorage, `loadState` из базы, снимки/корзина в базе, `storageProbe` с `idbMode`, устойчивость к сбою записи при миграции; просмотр заметки — полный текст без обрезки, закреплённая шапка с кнопками, Markdown и XSS, двойной клик/кнопка открывают редактор, закрытие кнопкой и Esc, обновление после сохранения, закрытие при удалении/смене папки/тэге/поиске/`resetNavigation`, `renderAll({ noteView: false })` не трогает панель, неизвестный id, фиксация/сброс ширины списка при открытии/закрытии, сохранение DOM списка.
+Что покрыто: дерево по перестановкам и счётчики, корневые заметки, `noteBelongsToPath`, `MAX_PERM_TAGS`; миграция старого формата, дедупликация тэгов и перенаправление ссылок, отбрасывание пустых, `isValidData`; разбор запроса (`#тэг`, `-тэг`, `title:`, `since/until` с пробелом), `matchesSearch`; Markdown (списки/чекбоксы, таблицы внутри кода, обёртка таблиц для прокрутки, пустые строки-разделители абзацев, XSS, схемы ссылок); превью карточек без таблиц; подсветка поиска; `restoreLastView` (многосегментный путь); `moveNoteToTag`, `cycleFacet`, `renameTag`; корзина/undo, меню «Версии данных» (открытие и переключение); `byteLength`; доступность фасетов; интеграция редактора (`openEditor`, `saveNote`, рендер с подсветкой); делегирование событий карточек и дерева, инкрементальное дерево (тот же DOM при клике, кэш детей), стартовое сворачивание дерева и сохранённая свёрнутость, `renderAll({ tree:false })`, инвалидация кэшей (`tagsLowerOf`, термы подсветки), `saveLastView` без лишних записей (с явным `flushDeferredSettings`), отложенный предпросмотр; слой хранения — `storageInit` без IndexedDB, миграция localStorage→IndexedDB, отсутствие тяжёлых ключей в localStorage, `loadState` из базы, снимки/корзина в базе, `storageProbe` с `idbMode`, устойчивость к сбою записи при миграции; **надёжность записи** — восстановление из backup и из снимка при повреждённом JSON, отсутствие ложного «восстановлено» на целых данных, кэш снимков и корзины, повтор записи после временного сбоя базы, освобождение места (`relieveQuota`), `withTimeout` для зависшей инициализации, отсутствие аварийного экрана при старте; просмотр заметки — полный текст без обрезки, закреплённая шапка с кнопками, Markdown и XSS, двойной клик/кнопка открывают редактор, закрытие кнопкой и Esc, обновление после сохранения, закрытие при удалении/смене папки/тэге/поиске/`resetNavigation`, `renderAll({ noteView: false })` не трогает панель, неизвестный id, фиксация/сброс ширины списка при открытии/закрытии, сохранение DOM списка.
 
 ## Правила при правках
 
@@ -281,6 +284,10 @@ node tests/run_test.js tests/note_tree.test.js
 - Новый тяжёлый ключ (заметки, снимки, корзина и т.п.) добавлять в `HEAVY_KEYS`; настройки оставлять в `localStorage`.
 - Не читать IndexedDB в обход `storageGet`/`storageInit`: синхронные вызовы должны видеть `memStore`.
 - `storageInit()` должен завершиться до `loadState()` (см. `startApp`).
+- Кэши хранения (`snapshotCache`, `trashCache`) сбрасывать в `storageClearMemory`; новые кэши снимков/корзины добавлять туда же, иначе тесты и импорт увидят старые данные.
+- Запись в IndexedDB не гарантирована с первого раза: ключ после сбоя остаётся в `idbDirty` и повторяется. Не «оптимизировать» это удалением из очереди — иначе данные молча теряются.
+- `saveToFile()` готовит payload и снимок состояния **синхронно**, до `await`; записи идут через `fileWriteChain`. Не добавлять `await` перед клонированием.
+- Отложенные записи настроек (`deferSetting`) обязаны сбрасываться на `pagehide`/`visibilitychange`; новые «медленные» ключи проводить через тот же механизм.
 - После мутаций заметок/тэгов — `invalidateTree()` (он же сбрасывает `treeDirty`, `treeRows`-пересборку, `tagsLowerCache` и `tagCountsCache`).
 - Новые кэши рендера сбрасывать в `invalidateTree()`, чтобы не разъехались с данными.
 - Не вешать обработчики на каждую карточку/строку дерева — только делегирование на `#notes`/`#tree`/`#noteView`.
@@ -298,7 +305,7 @@ node tests/run_test.js tests/note_tree.test.js
 1. Разметка: шапка (файл/версии/диагностика/тэги/экспорт/импорт/тема/+заметка), сайдбар (поиск + сортировка + фасеты + дерево), контент (крошки + список + просмотр заметки), модал редактора, менеджер тэгов, палитра, универсальный диалог, `#toast`, скрытые `#fileInput` и `#printArea`.
 2. CSS-переменные светлой/тёмной темы + адаптив ≤720px.
 3. Модель: `normalizeNote`, `isEmptyNote`, `uid`, таблица тэгов и `rebuildTagIndex`.
-4. Хранилище: `storageGet/storageSet` + `memStore`, `HEAVY_KEYS`, `storageInit` (поднимает кэш до `loadState`), `openIdb/idbGetAll/idbPut`, `queueIdbWrite/flushIdbWrites`, `migrateLsToIdb`, ключи, `loadState/saveState/saveTheme/saveCollapsed`.
+4. Хранилище: `storageGet/storageSet` + `memStore`, `HEAVY_KEYS`, `storageInit` (поднимает кэш до `loadState`, таймаут), `openIdb/idbGetAll/idbPut`, `queueIdbWrite/flushIdbWrites` с повторами, `relieveQuota`, `migrateLsToIdb`, кэши снимков/корзины, ключи, `loadState/saveState/saveTheme/saveCollapsed` и отложенная запись настроек.
 5. Ядро тэгов: `tagsOf`, `permute`, `notePaths`, `noteBelongsToPath`, `buildTree` + кэш и `MAX_PERM_TAGS`.
 6. Рендер: `renderTree/renderNode`, `renderBreadcrumbs`, `renderNotes`, `renderAll`, `matchesSearch`/`notesInPath`.
 7. Просмотр заметки: `.content-split` + `#noteView`, `openNoteView/closeNoteView/renderNoteView`, `goToPath`.

@@ -436,6 +436,8 @@ describe('Рендер: делегирование и инкрементальн
       app.currentPath = ['уникальный-путь'];
       app.saveLastView();
       app.saveLastView();
+      // Запись настроек отложена (debounce), поэтому сбрасываем очередь вручную.
+      app.flushDeferredSettings();
       strictEqual(writes, 1);
     } finally {
       proto.setItem = orig;
@@ -824,5 +826,147 @@ describe('Хранилище: IndexedDB для тяжёлых данных', () 
     if (app.idbMode) strictEqual(app.storageGet(HEAVY), payload);
     else strictEqual(window.localStorage.getItem(HEAVY), payload);
     strictEqual(app.idbMode, true, 'база открылась — значит читаем именно из памяти');
+  });
+});
+
+// Фейковая IndexedDB, у которой первые N записей падают: проверяем повторы.
+function makeFlakyIdb(failCount) {
+  const data = new Map();
+  let puts = 0;
+  const db = {
+    objectStoreNames: { contains: () => true },
+    createObjectStore: () => {},
+    close: () => {},
+    transaction(_store, mode) {
+      const tx = { oncomplete: null, onerror: null, onabort: null, error: null };
+      const store = {
+        get(key) {
+          const rq = {};
+          queueMicrotask(() => { rq.result = data.get(key); if (rq.onsuccess) rq.onsuccess(); });
+          if (mode === 'readonly') setTimeout(() => { if (tx.oncomplete) tx.oncomplete(); }, 0);
+          return rq;
+        },
+        put(value, key) {
+          puts++;
+          if (puts <= failCount) {
+            setTimeout(() => { tx.error = new Error('временный сбой'); if (tx.onerror) tx.onerror(); }, 0);
+          } else {
+            data.set(key, value);
+            setTimeout(() => { if (tx.oncomplete) tx.oncomplete(); }, 0);
+          }
+          return {};
+        },
+        delete(key) { data.delete(key); setTimeout(() => { if (tx.oncomplete) tx.oncomplete(); }, 0); }
+      };
+      tx.objectStore = () => store;
+      return tx;
+    }
+  };
+  return {
+    open() {
+      const req = {};
+      setTimeout(() => { req.result = db; if (req.onsuccess) req.onsuccess(); }, 0);
+      return req;
+    },
+    _data: data
+  };
+}
+
+describe('Хранилище: надёжность записи', () => {
+  const HEAVY = 'noteTreeData_v1';
+
+  test('повреждённый JSON восстанавливается из резервной копии', () => {
+    window.localStorage.setItem(HEAVY, '{"version":2,"notes":[');
+    window.localStorage.setItem(HEAVY + '_backup', JSON.stringify({
+      version: 2, tags: [], notes: [{ id: 'n1', title: 'Из резерва', body: 'текст', tagIds: [] }]
+    }));
+
+    app.loadState();
+
+    strictEqual(app.state.notes.length, 1);
+    strictEqual(app.state.notes[0].title, 'Из резерва');
+    strictEqual(app.storageProbe().recovered, 'backup');
+  });
+
+  test('если резерв тоже битый — берём последний снимок', () => {
+    window.localStorage.setItem(HEAVY, 'null');
+    window.localStorage.setItem(HEAVY + '_backup', '[] не json');
+    app.saveSnapshots([{
+      ts: 1, sig: '1:n5', count: 1,
+      data: { tags: [], notes: [{ id: 'n5', title: 'Из снимка', tagIds: [] }] }
+    }]);
+
+    app.loadState();
+
+    strictEqual(app.state.notes.length, 1);
+    strictEqual(app.state.notes[0].title, 'Из снимка');
+    strictEqual(app.storageProbe().recovered, 'snapshot');
+  });
+
+  test('исправные данные не помечаются как восстановленные', () => {
+    window.localStorage.setItem(HEAVY, JSON.stringify({
+      version: 2, tags: [], notes: [{ id: 'n1', title: 'Целые', tagIds: [] }]
+    }));
+    app.loadState();
+    strictEqual(app.state.notes[0].title, 'Целые');
+    strictEqual(app.storageProbe().recovered, '');
+  });
+
+  test('список снимков кэшируется и не перечитывается из хранилища', () => {
+    app.saveSnapshots([{ ts: 1, sig: '1:a', count: 1, data: { tags: [], notes: [] } }]);
+    const first = app.loadSnapshots();
+    const second = app.loadSnapshots();
+    strictEqual(first, second, 'тот же массив из памяти');
+    strictEqual(JSON.parse(window.localStorage.getItem('noteTreeSnapshots')).length, 1);
+  });
+
+  test('корзина кэшируется и сохраняется с ограничением', () => {
+    const items = [];
+    for (let i = 0; i < 25; i++) items.push({ deleted: i, note: { id: 'n' + i, title: 't', tagIds: [] } });
+    app.saveTrash(items);
+    const first = app.loadTrash();
+    const second = app.loadTrash();
+    strictEqual(first, second, 'тот же массив из памяти');
+    strictEqual(first.length, 20, 'корзина обрезана до 20');
+  });
+
+  test('сбой записи в базу повторяется и данные доходят', async () => {
+    const fake = makeFlakyIdb(2); // первые две записи падают
+    window.indexedDB = fake;
+    strictEqual(await app.storageInit(), true);
+    app.state.notes = app.applyData({ tags: [], notes: [{ id: 'n1', title: 'Повтор', tagIds: [] }] });
+
+    app.saveState();
+    await app.idbIdle();
+
+    ok(fake._data.has(HEAVY), 'запись дошла после повторов');
+    strictEqual(JSON.parse(fake._data.get(HEAVY)).notes[0].title, 'Повтор');
+  });
+
+  test('при нехватке места сначала удаляются старые снимки', () => {
+    const snaps = [];
+    for (let i = 0; i < 5; i++) snaps.push({ ts: i, sig: i + ':a', count: 1, data: { tags: [], notes: [] } });
+    app.saveSnapshots(snaps);
+    app.saveTrash([{ deleted: 1, note: { id: 'n1', title: 't', tagIds: [] } }]);
+
+    strictEqual(app.relieveQuota(), true);
+    strictEqual(app.loadSnapshots().length, 2, 'осталась половина снимков');
+    strictEqual(app.loadTrash().length, 1, 'корзину пока не трогали');
+  });
+
+  test('withTimeout не ждёт зависшую инициализацию', async () => {
+    await assert.rejects(
+      app.withTimeout(new Promise(() => {}), 20, 'таймаут базы'),
+      /таймаут базы/
+    );
+  });
+
+  test('старт приложения не уходит в аварийный экран', () => {
+    // Ловит опечатки вроде необъявленной переменной на пути startApp():
+    // раньше приложение показывало renderFatal, а тесты этого не замечали.
+    const notes = document.getElementById('notes');
+    strictEqual(notes.textContent.indexOf('Не удалось запустить приложение'), -1);
+    ok(document.querySelector('#tree'), 'дерево отрисовано');
+    ok(document.getElementById('search'), 'панель поиска на месте');
   });
 });
