@@ -95,7 +95,7 @@ tests/
   run_test.js           # мини-раннер на jsdom
   note_tree.test.js     # тесты
   package.json          # dev-зависимость jsdom
-note-tree.json          # пример экспорта
+tag-tree.json          # пример экспорта
 index.html              # редирект на tag-tree.html для GitHub Pages
 ```
 

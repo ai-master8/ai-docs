@@ -19,7 +19,7 @@
 | `tests/run_test.js` | мини-раннер: грузит приложение в jsdom |
 | `tests/note_tree.test.js` | сами тесты |
 | `tests/package.json` | dev-зависимость `jsdom`, скрипт `npm test` |
-| `note-tree.json` | пример экспорта (схема v2), не исходник |
+| `tag-tree.json` | пример экспорта (схема v2), не исходник |
 
 ## Карта кода `tag-tree.html`
 
@@ -221,7 +221,7 @@ renderAll(opts) → renderTree() + renderBreadcrumbs() + renderNotes() + renderN
 ## Экспорт, импорт, файловое хранение
 
 - `serializeData()` → `{ app: 'note-tree', version: 2, exported, tags, notes, backup }`; `backup` — глубокий снимок прошлого успешного сохранения в файл (`lastSavedState`), используется «♻️ Восстановить» (`restoreFromBackup`).
-- `exportData()` скачивает `note-tree.json`; `exportMd`/`exportTxt` — `заметки.md`/`заметки.txt`; `exportFound()` — только текущий фильтр/папку; `notesInFolder(path)` — заметки конкретной ветки (для экспорта/печати папки из контекстного меню, без учёта глобального поиска); `printNotes` — печать/PDF через `#printArea` и `window.print()` (без библиотек).
+- `exportData()` скачивает `tag-tree.json`; `exportMd`/`exportTxt` — `заметки.md`/`заметки.txt`; `exportFound()` — только текущий фильтр/папку; `notesInFolder(path)` — заметки конкретной ветки (для экспорта/печати папки из контекстного меню, без учёта глобального поиска); `printNotes` — печать/PDF через `#printArea` и `window.print()` (без библиотек).
 - Импорт (`#fileInput`): JSON → `isValidData` → подтверждение с числом записей → `state.notes = applyData(data)` → `resetNavigation()` → `saveState()` → `saveToFile()` → `renderAll()`.
 - `chooseFile()`: `showSaveFilePicker` → дескриптор в `fileHandle`, сохранение в IndexedDB, автосохранение; без API — обычный экспорт.
 - `saveToFile()` пишет JSON в привязанный файл; запоминает `lastFileWriteTs` и `lastWrittenSize` (в **байтах**, `byteLength`). При `NotAllowedError`/`NotFoundError`/потере разрешения сбрасывает привязку и предлагает выбрать файл заново.

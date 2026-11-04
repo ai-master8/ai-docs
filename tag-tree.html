@@ -1911,7 +1911,7 @@ function renderNotes() {
     let transfer = '';
     if (!searchQuery && currentPath.length === 0 && state.notes.length === 0) {
       // Экран переноса: предлагаем открыть файл данных с другой машины.
-      transfer = '<div style="margin-top:12px;color:var(--muted)">Перенос данных: выберите файл «note-tree.json» с предыдущего устройства.</div>' +
+      transfer = '<div style="margin-top:12px;color:var(--muted)">Перенос данных: выберите файл «tag-tree.json» с предыдущего устройства.</div>' +
         '<button class="primary" id="openDataBtn" style="margin-top:14px">📂 Открыть файл данных</button>';
     }
     container.innerHTML = `<div class="empty"><div class="big">🗂️</div><div>${msg}</div>${transfer}</div>`;
@@ -2920,7 +2920,7 @@ async function chooseFile() {
   if (typeof window.showSaveFilePicker === 'function') {
     try {
       fileHandle = await window.showSaveFilePicker({
-        suggestedName: 'note-tree.json',
+        suggestedName: 'tag-tree.json',
         types: [{ description: 'JSON', accept: { 'application/json': ['.json'] } }]
       });
       destroyFileHandle();
@@ -3738,7 +3738,7 @@ async function restoreFileHandle() {
 // ---------- Export / Import ----------
 function exportData() {
   const payload = JSON.stringify(serializeData(), null, 2);
-  downloadText(payload, 'note-tree.json', JSON_MIME);
+  downloadText(payload, 'tag-tree.json', JSON_MIME);
   notify('⬇️ Экспортировано');
 }
 function importData() {
