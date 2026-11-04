@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
-<title>Дерево заметок</title>
+<title>TagTree — заметки по тэгам</title>
 <style>
   :root {
     --bg: #f4f6fb;
@@ -49,6 +49,7 @@
     padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--panel);
   }
   header h1 { font-size: 20px; margin: 0; font-weight: 700; display: flex; align-items: center; gap: 10px; }
+  header h1 .brand-sub { font-size: 12px; font-weight: 500; color: var(--muted); letter-spacing: .2px; }
   .spacer { flex: 1; }
   button {
     border: 1px solid var(--border); background: var(--panel-2); color: var(--text);
@@ -327,6 +328,7 @@
   .burger { display: none; }
   /* Узкие экраны: просмотр заметки занимает всё место, список скрывается. */
   @media (max-width: 900px) {
+    header h1 .brand-sub { display: none; }
     .content-split.has-view .notes { display: none; }
     .note-view .nv-head { padding: 10px 16px; }
     .note-view .nv-scroll { padding: 14px 16px 48px; }
@@ -423,7 +425,7 @@
 
 <header>
   <button class="burger" id="burgerBtn" title="Меню">☰</button>
-  <h1><span>🗂️</span> Дерево заметок</h1>
+  <h1><span>🗂️</span> <span class="brand-name">TagTree</span> <span class="brand-sub">заметки по тэгам</span></h1>
   <div class="spacer"></div>
   <button id="fileBtn" title="Привязать локальный файл для автосохранения">💾 <span class="btn-label">Файл</span></button>
   <button id="backupBtn" title="Версии данных: снимки и восстановление">🕘</button>
@@ -3493,7 +3495,7 @@ function exportMd(notes) {
     const tags = tagsOf(n).map(t => '#' + t).join(' ');
     return '# ' + (n.title || UNTITLED) + '\n' + tags + '\n\n' + (n.body || '') + '\n\n';
   });
-  downloadText('# Дерево заметок\n\n' + lines.join('\n'), 'заметки.md');
+  downloadText('# TagTree\n\n' + lines.join('\n'), 'заметки.md');
 }
 function exportTxt(notes) {
   if (isEmptyList(notes)) { notify(NO_NOTES_MSG); return; }
