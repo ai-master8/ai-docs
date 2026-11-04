@@ -1825,15 +1825,7 @@ function renderPalette() {
       if (score < 0) return;
       items.push({ label: '🏷️ #' + t, hint: tagCount(t) + ' замет.', score, run: () => {
         closePalette();
-        const go = () => {
-          const s = document.getElementById('search');
-          if (s) s.value = '';
-          onSearch('');
-          goToPathRevealed([t]);
-        };
-        if (guardUnsavedEditor('В заметке есть несохранённые изменения. Перейти к тэгу без сохранения?', go)) return;
-        if (editorOpen) closeEditor({ silent: true });
-        go();
+        goToTag(t);
       } });
     });
     addGroup('Папки и тэги', sortByScore(items).slice(0, 12));
@@ -1901,20 +1893,34 @@ function renderPalette() {
     });
   });
 }
+// Общая навигация стрелками по списку подсказок или пунктов меню.
+// Возвращает true, если клавиша обработана (стрелка вверх/вниз).
+function moveActiveItem(items, e, options) {
+  if (!items || items.length === 0) return false;
+  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return false;
+  const o = options || {};
+  e.preventDefault();
+  let idx = items.findIndex(it => it.classList.contains('active'));
+  if (e.key === 'ArrowDown') idx = idx < 0 ? 0 : (idx + 1) % items.length;
+  else idx = idx <= 0 ? items.length - 1 : idx - 1;
+  items.forEach(it => it.classList.remove('active'));
+  items[idx].classList.add('active');
+  if (o.scroll !== false) items[idx].scrollIntoView({ block: 'nearest' });
+  return true;
+}
 // Клавиатурная навигация в палитре.
 function paletteKey(e) {
   const list = document.getElementById('paletteList');
   const items = [...list.querySelectorAll('.palette-item')];
   if (items.length === 0) return;
-  let idx = items.findIndex(it => it.classList.contains('active'));
-  if (e.key === 'ArrowDown') { e.preventDefault(); idx = (idx + 1) % items.length; }
-  else if (e.key === 'ArrowUp') { e.preventDefault(); idx = idx <= 0 ? items.length - 1 : idx - 1; }
-  else if (e.key === 'Enter') { e.preventDefault(); if (idx >= 0) items[idx].dispatchEvent(new MouseEvent('mousedown', { bubbles: true })); return; }
-  else if (e.key === 'Escape') { e.preventDefault(); closePalette(); return; }
-  else return;
-  items.forEach(it => it.classList.remove('active'));
-  items[idx].classList.add('active');
-  items[idx].scrollIntoView({ block: 'nearest' });
+  if (moveActiveItem(items, e)) return;
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    const idx = items.findIndex(it => it.classList.contains('active'));
+    if (idx >= 0) items[idx].dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    return;
+  }
+  if (e.key === 'Escape') { e.preventDefault(); closePalette(); }
 }
 
 function isPathActive(path) {
@@ -2391,7 +2397,7 @@ function renderNotes() {
       const c = safeCssColor(tagColor(t));
       const style = c ? ` style="background:${c};color:#fff"` : '';
       const title = escapeHtml('Открыть папку тэга «' + t + '»');
-      return `<span class="tag clk" title="${title}"${style}>${escapeHtml(t)}</span>`;
+      return `<span class="tag clk" data-tag="${escapeHtml(t)}" title="${title}"${style}>${escapeHtml(t)}</span>`;
     }).join('');
     const cls = 'note-card' + (n.pinned ? ' pinned' : '') + (selectedId === n.id ? ' selected' : '');
     const stars = clampRating(n.rating) ? starsHtml(n.rating) : '';
@@ -2636,6 +2642,20 @@ function revealTreePath(path) {
 function goToPathRevealed(path) {
   revealTreePath(path);
   goToPath(path);
+}
+// Перейти к папке тэга из карточки, просмотра или палитры: подтвердить уход
+// из редактора, очистить поиск и раскрыть ветку в дереве.
+function goToTag(tag) {
+  if (!tag) return;
+  const go = () => {
+    const input = document.getElementById('search');
+    if (input) input.value = '';
+    onSearch('');
+    goToPathRevealed([tag]);
+  };
+  if (guardUnsavedEditor('В заметке есть несохранённые изменения. Перейти к тэгу без сохранения?', go)) return;
+  if (editorOpen) closeEditor({ silent: true });
+  go();
 }
 // Перерисовать правую панель по viewingId. Всё пользовательское — через
 // escapeHtml/renderMarkdown, цвета — через safeCssColor (анти-XSS).
@@ -2899,14 +2919,8 @@ function tagInputKey(e) {
   if (!box || !box.classList.contains('show')) return;
   const items = [...box.querySelectorAll('.ts')];
   if (items.length === 0) return;
-  let idx = items.findIndex(it => it.classList.contains('active'));
-  if (e.key === 'ArrowDown') { e.preventDefault(); idx = (idx + 1) % items.length; }
-  else if (e.key === 'ArrowUp') { e.preventDefault(); idx = idx <= 0 ? items.length - 1 : idx - 1; }
-  else if (e.key === 'Escape') { e.preventDefault(); hideTagSuggest(); return; }
-  else return;
-  items.forEach(it => it.classList.remove('active'));
-  items[idx].classList.add('active');
-  items[idx].scrollIntoView({ block: 'nearest' });
+  if (moveActiveItem(items, e)) return;
+  if (e.key === 'Escape') { e.preventDefault(); hideTagSuggest(); }
 }
 // Автодополнение существующих тэгов в поле ввода тэга редактора.
 function updateTagSuggest() {
@@ -4640,12 +4654,27 @@ window.addEventListener('error', function (ev) {
 // Единая точка подключения обработчиков событий (вместо инлайн-атрибутов).
 function attachEvents() {
   const $ = id => document.getElementById(id);
-  // Дописать отложенные записи настроек и IndexedDB перед закрытием/скрытием вкладки.
+  attachLifecycleEvents();
+  attachHeaderEvents($);
+  attachNotesEvents($);
+  attachTreeEvents($);
+  attachSearchEvents($);
+  attachEditorEvents($);
+  attachTagManagerEvents($);
+  attachPaletteEvents($);
+  attachMarkdownEvents($);
+  attachDialogEvents($);
+}
+// Дописать отложенные записи настроек и IndexedDB перед закрытием/скрытием вкладки.
+function attachLifecycleEvents() {
   const flushPending = () => { flushDeferredSettings(); flushIdbWrites(); };
   window.addEventListener('pagehide', flushPending);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') flushPending();
   });
+}
+// Шапка: файл, версии данных, диагностика, экспорт/импорт, тема и новая заметка.
+function attachHeaderEvents($) {
   $('burgerBtn').addEventListener('click', toggleSidebar);
   $('fileBtn').addEventListener('click', chooseFile);
   // Кнопка «Версии данных»: stopPropagation обязателен, иначе документный
@@ -4661,6 +4690,9 @@ function attachEvents() {
   $('importBtn').addEventListener('click', importData);
   $('themeBtn').addEventListener('click', toggleTheme);
   $('newNoteBtn').addEventListener('click', () => openEditor());
+}
+// Список заметок и просмотр: делегирование кликов, меню, drag-and-drop.
+function attachNotesEvents($) {
   // Навигация клавиатурой по карточкам заметок.
   $('notes').addEventListener('keydown', notesKeyNav);
   // Делегирование событий карточек: один обработчик вместо тысяч замыканий.
@@ -4684,11 +4716,7 @@ function attachEvents() {
     }
     const tagEl = e.target.closest('#notes .tag');
     if (tagEl) {
-      const t = tagEl.textContent;
-      const go = () => { onSearch(''); currentPath = [t]; renderAll(); };
-      if (guardUnsavedEditor('В заметке есть несохранённые изменения. Перейти к тэгу без сохранения?', go)) return;
-      if (editorOpen) closeEditor({ silent: true });
-      go();
+      goToTag(tagEl.dataset.tag || tagEl.textContent);
       return;
     }
     const card = e.target.closest('#notes .note-card');
@@ -4707,9 +4735,7 @@ function attachEvents() {
     const tagEl = e.target.closest('.nv-tags .tag');
     if (tagEl) {
       const name = tagEl.dataset.tag;
-      if (!name) return;
-      onSearch('');
-      goToPath([name]);
+      if (name) goToTag(name);
     }
   });
   $('notes').addEventListener('contextmenu', (e) => {
@@ -4724,6 +4750,9 @@ function attachEvents() {
     e.dataTransfer.setData(DND_MIME, card.dataset.noteId);
     e.dataTransfer.effectAllowed = 'move';
   });
+}
+// Дерево папок: клавиатура, клики, контекстное меню, drag-and-drop и сворачивание.
+function attachTreeEvents($) {
   // Навигация клавиатурой по дереву папок.
   $('tree').addEventListener('keydown', treeKeyNav);
   // Делегирование событий дерева (строки пересоздаются при изменении данных).
@@ -4735,6 +4764,9 @@ function attachEvents() {
   // Развернуть/свернуть всё дерево.
   $('expandAllBtn').addEventListener('click', expandAllTree);
   $('collapseAllBtn').addEventListener('click', collapseAllTree);
+}
+// Поиск, его область, сортировка, фасеты и сохранённые фильтры.
+function attachSearchEvents($) {
   // Небольшой debounce: не перефильтровывать все заметки на каждую букву.
   // Прямые вызовы onSearch() (фасеты, представления, автодополнение) остаются синхронными.
   let searchDebounce = null;
@@ -4759,10 +4791,12 @@ function attachEvents() {
       return;
     }
     if (items.length === 0) return;
-    const idx = items.findIndex(el => el.classList.contains('active'));
-    if (e.key === 'ArrowDown') { e.preventDefault(); items[(idx + 1) % items.length].classList.add('active'); if (idx >= 0) items[idx].classList.remove('active'); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); items[(idx - 1 + items.length) % items.length].classList.add('active'); if (idx >= 0) items[idx].classList.remove('active'); }
-    else if (e.key === 'Enter' && idx >= 0) { e.preventDefault(); items[idx].click(); }
+    // Поле поиска не прокручиваем: подсказки и так видны под ним.
+    if (moveActiveItem(items, e, { scroll: false })) return;
+    if (e.key === 'Enter') {
+      const idx = items.findIndex(el => el.classList.contains('active'));
+      if (idx >= 0) { e.preventDefault(); items[idx].click(); }
+    }
   });
   $('searchScope').addEventListener('click', (e) => {
     const b = e.target.closest('.scope-btn');
@@ -4777,6 +4811,9 @@ function attachEvents() {
   $('facetsToggle').addEventListener('click', (e) => { e.stopPropagation(); toggleFacets(); });
   $('facetsReset').addEventListener('click', (e) => { e.stopPropagation(); resetFacets(); });
   $('saveViewBtn').addEventListener('click', (e) => { e.stopPropagation(); promptSaveView(); });
+}
+// Редактор: сохранение/отмена/удаление, рейтинг и поле тэгов.
+function attachEditorEvents($) {
   $('editorCloseBtn').addEventListener('click', requestCloseEditor);
   $('btnCancel').addEventListener('click', requestCloseEditor);
   $('btnSave').addEventListener('click', saveNote);
@@ -4793,7 +4830,9 @@ function attachEvents() {
   $('fTags').addEventListener('keydown', tagInputKey);
   $('fTags').addEventListener('input', () => { updateTagSuggest(); updateEditorDirtyMark(); });
   $('fTags').addEventListener('focus', updateTagSuggest);
-  // Менеджер тэгов
+}
+// Менеджер тэгов: список, поиск, уборка пустых и похожие имена.
+function attachTagManagerEvents($) {
   $('tagsBtn').addEventListener('click', openTagManager);
   $('tmCloseBtn').addEventListener('click', closeTagManager);
   $('tmDoneBtn').addEventListener('click', closeTagManager);
@@ -4801,10 +4840,15 @@ function attachEvents() {
   $('tmCleanBtn').addEventListener('click', removeOrphanTags);
   $('tmSimilarBtn').addEventListener('click', highlightSimilarTags);
   $('tagManagerMask').addEventListener('click', (e) => { if (e.target === e.currentTarget) closeTagManager(); });
-  // Командная палитра
+}
+// Командная палитра (Ctrl+K).
+function attachPaletteEvents($) {
   $('paletteInput').addEventListener('input', renderPalette);
   $('paletteInput').addEventListener('keydown', paletteKey);
   $('paletteMask').addEventListener('click', (e) => { if (e.target === e.currentTarget) closePalette(); });
+}
+// Markdown-редактор: режимы, тулбар, предпросмотр и поиск/замена по тексту.
+function attachMarkdownEvents($) {
   // WYSIWYG: переключатели Редактор / Разделить / Предпросмотр + тулбар
   $('mdEditBtn').addEventListener('click', () => setMdMode('edit'));
   $('mdSplitBtn').addEventListener('click', () => setMdMode('split'));
@@ -4829,7 +4873,9 @@ function attachEvents() {
   $('mdReplaceAll').addEventListener('click', mdReplaceAll);
   $('mdFind').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); mdFindNext(); } if (e.key === 'Escape') closeFindBar(); });
   $('mdReplace').addEventListener('keydown', (e) => { if (e.key === 'Escape') closeFindBar(); });
-  // Универсальный диалог
+}
+// Универсальный диалог (ввод/подтверждение).
+function attachDialogEvents($) {
   $('dialogOkBtn').addEventListener('click', () => {
     const inp = document.getElementById('dialogInput');
     const wrap = document.getElementById('dialogInputWrap');

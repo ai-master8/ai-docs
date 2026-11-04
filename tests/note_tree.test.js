@@ -227,6 +227,52 @@ describe('Быстрый переход (Ctrl+K)', () => {
   });
 });
 
+describe('Клавиатурная навигация по спискам', () => {
+  test('палитра: стрелки выбирают пункт, Enter запускает его', () => {
+    seed([{ id: 't1', name: 'работа' }], []);
+    app.openPalette();
+    const input = document.getElementById('paletteInput');
+    input.value = '#раб';
+    app.renderPalette();
+    const item = document.querySelector('#paletteList .palette-item');
+    ok(item, 'пункт найден');
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    strictEqual(item.classList.contains('active'), true, 'первый пункт стал активным');
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    strictEqual(document.getElementById('paletteMask').classList.contains('show'), false, 'палитра закрылась');
+    deepEqual(app.currentPath, ['работа']);
+  });
+
+  test('автодополнение тэгов: стрелка вниз выбирает первую подсказку', () => {
+    seed([{ id: 't1', name: 'работа' }], []);
+    app.openEditor();
+    const input = document.getElementById('fTags');
+    input.value = 'раб';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    const item = document.querySelector('#tagSuggest .ts');
+    ok(item, 'подсказка показана');
+    strictEqual(item.classList.contains('active'), false);
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    strictEqual(item.classList.contains('active'), true);
+    app.closeEditor({ silent: true });
+  });
+
+  test('подсказки поиска: стрелка и Enter подставляют тэг', () => {
+    seed([{ id: 't1', name: 'работа' }], []);
+    app.renderAll();
+    const input = document.getElementById('search');
+    input.value = '#раб';
+    app.updateSearchSuggest();
+    const item = document.querySelector('#searchSuggest .sugg');
+    ok(item, 'подсказка показана');
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+    strictEqual(item.classList.contains('active'), true);
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    ok(input.value.indexOf('#работа') === 0, 'тэг подставлен в поле');
+    strictEqual(document.getElementById('searchSuggest').classList.contains('show'), false);
+  });
+});
+
 describe('Markdown', () => {
   test('списки получают классы md-ul / md-ul.todo, нумерованные — <ol>', () => {
     const ul = app.renderMarkdown('- один\n- два');
@@ -612,6 +658,29 @@ describe('Рендер: делегирование и инкрементальн
     tag.click();
     deepEqual(app.currentPath, ['a']);
     strictEqual(app.editorOpen, false);
+  });
+
+  test('клик по бэйджу тэга раскрывает свёрнутую ветку', () => {
+    seedTree();
+    app.onSearch('Заметка');
+    app.collapsed.add('a');
+    document.querySelector('#notes .tag').click();
+    deepEqual(app.currentPath, ['a']);
+    strictEqual(app.collapsed.has('a'), false, 'ветка раскрыта для перехода');
+  });
+
+  test('клик по тэгу с несохранёнными правками сначала спрашивает подтверждение', async () => {
+    seed([{ id: 't1', name: 'a' }], [{ id: 'n1', title: 'Заметка', tagIds: ['t1'] }]);
+    app.onSearch('Заметка');
+    app.openEditor('n1');
+    document.getElementById('fTitle').value = 'Изменено';
+    ok(app.editorDirty());
+    document.querySelector('#notes .tag').click();
+    ok(document.getElementById('dialogMask').classList.contains('show'), 'показан диалог');
+    document.getElementById('dialogCancelBtn').click();
+    await Promise.resolve();
+    deepEqual(app.currentPath, [], 'отмена оставила прежнюю папку');
+    strictEqual(app.editorOpen, true, 'редактор не закрыт');
   });
 
   test('клик по папке обновляет дерево без пересоздания DOM', () => {
