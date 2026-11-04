@@ -150,6 +150,30 @@ describe('Поиск и разбор запроса', () => {
     strictEqual(btn.classList.contains('active'), false);
   });
 
+  test('кнопка очистки поиска появляется при запросе и сбрасывает его', () => {
+    seed([], [{ id: 'n1', title: 'Заметка', body: 'текст', tagIds: [] }]);
+    const clear = document.getElementById('searchClear');
+    strictEqual(clear.hidden, true);
+    app.onSearch('заметка');
+    strictEqual(clear.hidden, false);
+    clear.click();
+    strictEqual(document.getElementById('search').value, '');
+    strictEqual(clear.hidden, true);
+    strictEqual(document.querySelectorAll('#notes .note-card').length, 1);
+  });
+
+  test('пустая выдача поиска предлагает сбросить поиск', () => {
+    seed([], [{ id: 'n1', title: 'Заметка', body: 'текст', tagIds: [] }]);
+    app.onSearch('нет-такого');
+    const box = document.querySelector('#notes .empty');
+    ok(box && box.textContent.includes('Ничего не найдено'));
+    const reset = box.querySelector('#emptyResetBtn');
+    ok(reset, 'кнопка сброса отрендерена');
+    reset.click();
+    strictEqual(document.getElementById('search').value, '');
+    strictEqual(document.querySelectorAll('#notes .note-card').length, 1);
+  });
+
   test('в результатах поиска виден путь и кнопка перехода в дерево', () => {
     seed(
       [{ id: 't1', name: 'a' }, { id: 't2', name: 'b' }],
