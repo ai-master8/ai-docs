@@ -75,6 +75,11 @@
     width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: 9px;
     background: var(--panel-2); color: var(--text); font-size: 13px;
   }
+  .search-scope { display: flex; gap: 4px; margin-top: 6px; }
+  .search-scope .scope-btn { flex: 1; padding: 4px 8px; font-size: 11px; font-weight: 600; border-radius: 7px; color: var(--muted); background: transparent; }
+  .search-scope .scope-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .search-scope .scope-btn:disabled { opacity: .45; cursor: not-allowed; }
+  .search-scope .scope-btn:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
   .search-suggest {
     position: absolute; left: 12px; right: 12px; top: calc(100% - 6px); z-index: 70;
     background: var(--panel); border: 1px solid var(--border); border-radius: 9px;
@@ -177,6 +182,10 @@
   .note-card .preview a { color: var(--accent); text-decoration: underline; }
   .note-card .tags { display: flex; flex-wrap: wrap; gap: 6px; }
   .note-card .tag { font-size: 11px; padding: 2px 8px; border-radius: 8px; background: var(--accent); color: #fff; font-weight: 600; }
+  .note-card .note-path { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 11px; color: var(--muted); }
+  .note-card .note-path .np-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .note-card .note-path .np-show { flex: 0 0 auto; padding: 1px 7px; font-size: 10px; font-weight: 600; color: var(--muted); background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; }
+  .note-card .note-path .np-show:hover { color: var(--accent); border-color: var(--accent); }
   .note-card .dt { font-size: 11px; color: var(--muted); }
   .empty { color: var(--muted); text-align: center; padding: 60px 20px; grid-column: 1 / -1; }
   .empty .big { font-size: 40px; margin-bottom: 10px; }
@@ -291,9 +300,10 @@
   .palette-modal { align-self: flex-start; margin-top: 10vh; }
   .palette-modal .modal-body { gap: 8px; }
   .palette-list { display: flex; flex-direction: column; gap: 2px; max-height: 50vh; overflow: auto; margin-top: 8px; }
+  .palette-group { padding: 8px 10px 3px; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
   .palette-item { padding: 8px 10px; border-radius: 8px; cursor: pointer; font-size: 13px; display: flex; justify-content: space-between; gap: 8px; }
   .palette-item:hover, .palette-item.active { background: var(--panel-2); }
-  .palette-item .pi-hint { color: var(--muted); font-size: 11px; }
+  .palette-item .pi-hint { color: var(--muted); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; }
   .tm-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--panel); }
   .tm-row:hover { border-color: var(--accent); }
   .tm-dot { width: 14px; height: 14px; border-radius: 50%; flex: 0 0 auto; border: 1px solid var(--border); }
@@ -366,6 +376,8 @@
     .field input, .field textarea, .field select { font-size: 16px; }
     /* Тач-цели: палец, а не мышка. */
     .facet { padding: 7px 12px; font-size: 13px; }
+    .search-scope .scope-btn { min-height: 38px; font-size: 12px; }
+    .note-card .note-path .np-show { min-height: 28px; }
     .facet .cnt, .tag-badge, .tag-hint, .search-suggest .sugg, .view-item,
     .node-row, .root-note, .ctx-item { min-height: 38px; }
     .note-card .tag, .note-view .tag { min-height: 28px; display: inline-flex; align-items: center; }
@@ -440,7 +452,11 @@
 <main>
   <aside class="sidebar" id="sidebar">
     <div class="search">
-      <input id="search" type="text" placeholder="Поиск: слова, #тэг, -тэг, title:…">
+      <input id="search" type="text" placeholder="Поиск: слова, #тэг, -тэг, title:… (/)" title="Быстрый фокус: /">
+      <div class="search-scope" id="searchScope" role="group" aria-label="Область поиска">
+        <button type="button" class="scope-btn active" data-scope="all" title="Искать по всему архиву">Везде</button>
+        <button type="button" class="scope-btn" data-scope="folder" title="Искать только в текущей папке">В папке</button>
+      </div>
       <div class="search-suggest" id="searchSuggest"></div>
     </div>
     <div class="sortbar">
@@ -582,11 +598,11 @@
   </div>
 </div>
 
-<!-- Командная палитра (Ctrl+P) -->
+<!-- Командная палитра / быстрый переход (Ctrl+K) -->
 <div class="modal-mask" id="paletteMask">
   <div class="modal narrow palette-modal" role="dialog" aria-modal="true">
     <div class="modal-body" style="padding:12px">
-      <input id="paletteInput" class="tm-search" type="text" placeholder="Команда или заметка… (Ctrl+P)" autocomplete="off">
+      <input id="paletteInput" class="tm-search" type="text" placeholder="Папка, заметка или команда… (Ctrl+K)" autocomplete="off">
       <div class="palette-list" id="paletteList"></div>
     </div>
   </div>
@@ -652,6 +668,7 @@ let viewingId = null;       // id заметки, показанной цели�
 let currentTags = [];       // тэги в редакторе
 let editorSnapshot = '';    // снимок состояния редактора (для отслеживания изменений)
 let searchQuery = '';
+let searchScope = 'all';   // all | folder — где искать при непустом запросе
 let collapsed = new Set();  // свёрнутые ключи веток "t1/t2"
 let sortMode = 'updated';   // режим сортировки заметок: updated|created|title
 
@@ -1601,7 +1618,7 @@ function treeHandleDrop(e) {
   if (noteId && rec) moveNoteToTag(noteId, rec.name);
 }
 
-// ---------- Командная палитра (Ctrl+P) ----------
+// ---------- Командная палитра / быстрый переход (Ctrl+K) ----------
 // Список команд + переход к заметкам/тэгам.
 function paletteCommands() {
   return [
@@ -1634,51 +1651,123 @@ function openPalette() {
 function closePalette() {
   document.getElementById('paletteMask').classList.remove('show');
 }
+// Оценка совпадения для палитры: точное/начало/подстрока/нечёткое.
+function paletteScore(text, q) {
+  if (!q) return 0;
+  const t = String(text || '').toLowerCase();
+  if (!t) return -1;
+  if (t === q) return 0;
+  if (t.startsWith(q)) return 1;
+  const idx = t.indexOf(q);
+  if (idx !== -1) return 2 + Math.min(idx, 20) / 100;
+  return fuzzyMatch(q, t) ? 3 : -1;
+}
 // Отфильтровать и отрисовать элементы палитры.
+// Ctrl+K открывает единый список: команды, папки/тэги, заметки и фильтры.
+// Префиксы: «>» — только команды, «#» — только тэги, «@» — только заметки.
 function renderPalette() {
   const list = document.getElementById('paletteList');
   if (!list) return;
-  const q = (document.getElementById('paletteInput').value || '').trim().toLowerCase();
-  const items = [];
-  // Команды
-  paletteCommands().forEach(c => {
-    if (!q || c.label.toLowerCase().includes(q)) items.push({ label: c.label, hint: c.hint, run: c.run });
-  });
-  // Тэги
-  state.tags.map(t => t.name).filter(Boolean).sort((a, b) => a.localeCompare(b, LOCALE)).forEach(t => {
-    if (q && !t.toLowerCase().includes(q)) return;
-    items.push({ label: '🏷️ #' + t, hint: tagCount(t) + ' замет.', run: () => {
-      closePalette();
-      currentPath = [t];
-      const s = document.getElementById('search');
-      if (s) s.value = '';
-      searchQuery = '';
-      renderAll();      // рендерим уже без активного поиска
-      renderFacets();   // и пересобираем панель фильтров
-    } });
-  });
-  // Заметки (ограничить 20)
-  let noteMatches = 0;
-  state.notes.forEach(n => {
-    const title = n.title || UNTITLED;
-    if (q && !title.toLowerCase().includes(q)) return;
-    if (noteMatches >= 20) return;
-    noteMatches++;
-    items.push({ label: '📄 ' + title, hint: tagsOf(n).map(t => '#' + t).join(' '), run: () => { closePalette(); selectNote(n.id); } });
-  });
+  const raw = (document.getElementById('paletteInput').value || '').trim();
+  let q = raw.toLowerCase();
+  let mode = 'all';
+  if (q[0] === '>') { mode = 'commands'; q = q.slice(1).trim(); }
+  else if (q[0] === '#') { mode = 'tags'; q = q.slice(1).trim(); }
+  else if (q[0] === '@') { mode = 'notes'; q = q.slice(1).trim(); }
+
+  const groups = [];
+  const addGroup = (title, items) => { if (items.length) groups.push({ title, items }); };
+  const sortByScore = (items) => {
+    if (!q) return items;
+    return items.sort((a, b) => (a.score - b.score) || a.label.localeCompare(b.label, LOCALE));
+  };
+
+  if (mode === 'all' || mode === 'commands') {
+    const items = [];
+    paletteCommands().forEach(c => {
+      const score = paletteScore(c.label, q);
+      if (score < 0) return;
+      items.push({ label: c.label, hint: c.hint, score, run: c.run });
+    });
+    addGroup('Команды', sortByScore(items));
+  }
+
+  if (mode === 'all' || mode === 'tags') {
+    const items = [];
+    allTags().forEach(t => {
+      const score = paletteScore(t, q);
+      if (score < 0) return;
+      items.push({ label: '🏷️ #' + t, hint: tagCount(t) + ' замет.', score, run: () => {
+        closePalette();
+        const s = document.getElementById('search');
+        if (s) s.value = '';
+        onSearch('');
+        goToPathRevealed([t]);
+      } });
+    });
+    addGroup('Папки и тэги', sortByScore(items).slice(0, 12));
+  }
+
+  if (mode === 'all' || mode === 'notes') {
+    const items = [];
+    const source = q ? state.notes : sortNotes(state.notes, 'updated');
+    source.forEach(n => {
+      const title = n.title || UNTITLED;
+      const tagLine = tagsOf(n).join(' ');
+      let score = 0;
+      if (q) {
+        const titleScore = paletteScore(title, q);
+        const tagScore = paletteScore(tagLine, q);
+        score = titleScore >= 0 && tagScore >= 0 ? Math.min(titleScore, tagScore)
+          : Math.max(titleScore, tagScore);
+      }
+      if (score < 0) return;
+      items.push({
+        label: '📄 ' + title,
+        hint: tagsOf(n).map(t => '#' + t).join(' ') || 'Без тэга',
+        score,
+        run: () => { closePalette(); selectNote(n.id); }
+      });
+    });
+    addGroup('Заметки', sortByScore(items).slice(0, 10));
+  }
+
+  if (mode === 'all') {
+    const items = [];
+    loadViews().forEach(v => {
+      const score = paletteScore(v.name, q);
+      if (score < 0) return;
+      items.push({
+        label: '💾 ' + v.name,
+        hint: v.query || 'фильтр',
+        score,
+        run: () => { closePalette(); applyView(v.query); }
+      });
+    });
+    addGroup('Сохранённые фильтры', sortByScore(items).slice(0, 6));
+  }
+
   list.innerHTML = '';
-  if (items.length === 0) {
+  if (groups.length === 0) {
     const e = document.createElement('div'); e.className = 'tm-empty'; e.textContent = 'Ничего не найдено';
     list.appendChild(e); return;
   }
-  items.slice(0, 40).forEach((it, i) => {
-    const d = document.createElement('div');
-    d.className = 'palette-item' + (i === 0 ? ' active' : '');
-    const nm = document.createElement('span'); nm.textContent = it.label;
-    const h = document.createElement('span'); h.className = 'pi-hint'; h.textContent = it.hint || '';
-    d.appendChild(nm); d.appendChild(h);
-    d.onmousedown = (e) => { e.preventDefault(); it.run(); };
-    list.appendChild(d);
+  let first = true;
+  groups.forEach(g => {
+    const head = document.createElement('div');
+    head.className = 'palette-group';
+    head.textContent = g.title;
+    list.appendChild(head);
+    g.items.forEach(it => {
+      const d = document.createElement('div');
+      d.className = 'palette-item' + (first ? ' active' : '');
+      first = false;
+      const nm = document.createElement('span'); nm.textContent = it.label;
+      const h = document.createElement('span'); h.className = 'pi-hint'; h.textContent = it.hint || '';
+      d.appendChild(nm); d.appendChild(h);
+      d.onmousedown = (e) => { e.preventDefault(); it.run(); };
+      list.appendChild(d);
+    });
   });
 }
 // Клавиатурная навигация в палитре.
@@ -1853,6 +1942,16 @@ function matchesSearch(n) {
 // Заметки папки currentPath (без учёта поиска).
 function notesInPath() {
   return state.notes.filter(n => noteBelongsToPath(n, currentPath));
+}
+// Область поиска: «Везде» — весь архив, «В папке» — только currentPath.
+function inSearchScope(n) {
+  return searchScope !== 'folder' || noteBelongsToPath(n, currentPath);
+}
+function matchesSearchScoped(n) {
+  return inSearchScope(n) && matchesSearch(n);
+}
+function searchScopeNotes() {
+  return state.notes.filter(matchesSearchScoped);
 }
 
 // ---------- Markdown (безопасный поднабор) ----------
@@ -2059,7 +2158,7 @@ function sortMenu() {
 
 // Экспортировать только заметки, попадающие в текущий фильтр (поиск) или папку.
 function exportFound() {
-  const list = searchQuery ? state.notes.filter(matchesSearch) : notesInPath();
+  const list = searchQuery ? searchScopeNotes() : notesInPath();
   if (!list.length) { notify('🎯 Нечего экспортировать: пусто по текущему фильтру'); return; }
   exportMd(list);
   notify('🎯 Экспортировано: ' + list.length + ' заметок');
@@ -2107,9 +2206,9 @@ function previewText(body) {
 }
 function renderNotes() {
   const container = document.getElementById('notes');
-  // Поиск — глобальный: если введён запрос, ищем по всем заметкам всех папок,
-  // игнорируя текущую папку. Без запроса — показываем только заметки папки.
-  let notes = searchQuery ? state.notes.filter(matchesSearch) : notesInPath();
+  // Поиск: при введённом запросе — по всему архиву или только по текущей
+  // папке (searchScope), без запроса — только заметки папки.
+  let notes = searchQuery ? searchScopeNotes() : notesInPath();
 
   // сортировка по выбранному режиму (sortNotes возвращает отсортированную копию)
   notes = sortNotes(notes, sortMode);
@@ -2117,7 +2216,8 @@ function renderNotes() {
   notes = notes.filter(n => n.pinned).concat(notes.filter(n => !n.pinned));
 
   if (notes.length === 0) {
-    let msg = searchQuery ? 'Ничего не найдено'
+    let msg = searchQuery
+      ? (searchScope === 'folder' ? 'В этой папке ничего не найдено' : 'Ничего не найдено')
       : (currentPath.length ? 'В этой папке пока нет заметок' : 'Нет заметок. Добавьте первую заметку или откройте файл данных.');
     let transfer = '';
     if (!searchQuery && currentPath.length === 0 && state.notes.length === 0) {
@@ -2135,6 +2235,12 @@ function renderNotes() {
   const parts = notes.map(n => {
     const preview = previewText(n.body);
     const dt = humanDate(n.updated || n.created);
+    const pathTags = pathTagsOf(n);
+    const pathText = pathTags.length ? pathTags.join(' / ') : 'Без тэга';
+    const pathHtml = searchQuery
+      ? `<div class="note-path"><span class="np-text" title="${escapeHtml(pathText)}">${escapeHtml(pathText)}</span>`
+        + `<button type="button" class="np-show" data-path="${escapeHtml(JSON.stringify(pathTags))}" title="Показать в дереве">в дереве</button></div>`
+      : '';
     const tagsHtml = tagsOf(n).map(t => {
       const c = safeCssColor(tagColor(t));
       const style = c ? ` style="background:${c};color:#fff"` : '';
@@ -2145,6 +2251,7 @@ function renderNotes() {
     return `<div class="${cls}" data-note-id="${escapeHtml(n.id)}" tabindex="0" draggable="true">`
       + `<h3>${escapeHtml((n.pinned ? '📌 ' : '') + (n.title || UNTITLED))}</h3>`
       + `<div class="preview">${renderMarkdown(preview)}</div>`
+      + pathHtml
       + `<div class="tags">${tagsHtml}</div>`
       + `<div class="dt">Обновлено: ${escapeHtml(dt)}</div>`
       + `</div>`;
@@ -2226,8 +2333,10 @@ function renderBreadcrumbs() {
   });
   const cnt = document.createElement('span');
   cnt.className = 'cnt';
-  const count = (searchQuery ? state.notes.filter(matchesSearch) : notesInPath()).length;
-  cnt.textContent = searchQuery ? (count + ' найдено') : (count + ' заметок');
+  const count = (searchQuery ? searchScopeNotes() : notesInPath()).length;
+  cnt.textContent = searchQuery
+    ? (count + ' найдено' + (searchScope === 'folder' ? ' в папке' : ''))
+    : (count + ' заметок');
   el.appendChild(cnt);
 }
 
@@ -2235,8 +2344,10 @@ function renderBreadcrumbs() {
 // renderAll({ tree: false }) — когда данные дерева не менялись.
 function renderAll(opts) {
   const o = opts || {};
+  renderSearchScope();
   if (o.tree !== false) renderTree();
   if (o.crumbs !== false) renderBreadcrumbs();
+  if (o.facets !== false) renderFacets();
   if (o.notes !== false) renderNotes();
   if (o.noteView !== false) renderNoteView();
   if (o.view !== false) saveLastView();
@@ -2247,7 +2358,7 @@ function renderAll(opts) {
 // достаточно одной записи, а pagehide сбрасывает очередь принудительно.
 let lastViewJSON = null;
 function saveLastView(immediate) {
-  const json = JSON.stringify({ path: currentPath, q: searchQuery || '' });
+  const json = JSON.stringify({ path: currentPath, q: searchQuery || '', scope: searchScope });
   if (json === lastViewJSON) return;
   lastViewJSON = json;
   if (immediate) {
@@ -2273,6 +2384,8 @@ function restoreLastView() {
       currentPath = valid;
     }
     if (typeof v.q === 'string' && v.q) { searchQuery = v.q; const s = document.getElementById('search'); if (s) s.value = v.q; }
+    if (v.scope === 'folder' || v.scope === 'all') searchScope = v.scope;
+    renderSearchScope();
     return true;
   } catch (e) { return false; }
 }
@@ -2350,6 +2463,22 @@ function goToPath(path) {
   viewingId = null;
   currentPath = path;
   renderAll();
+}
+// Раскрыть ветку, чтобы переход из поиска/палитры был виден в дереве.
+function revealTreePath(path) {
+  if (!Array.isArray(path) || !path.length) return;
+  let changed = false;
+  for (let i = 0; i < path.length; i++) {
+    if (collapsed.delete(path.slice(0, i + 1).join('/'))) changed = true;
+  }
+  if (changed) {
+    saveCollapsed();
+    treeDirty = true;
+  }
+}
+function goToPathRevealed(path) {
+  revealTreePath(path);
+  goToPath(path);
 }
 // Перерисовать правую панель по viewingId. Всё пользовательское — через
 // escapeHtml/renderMarkdown, цвета — через safeCssColor (анти-XSS).
@@ -2804,13 +2933,47 @@ async function deleteNote() {
 }
 
 // ---------- Search ----------
+// Подсветить выбранную область поиска.
+function renderSearchScope() {
+  const box = document.getElementById('searchScope');
+  if (!box) return;
+  const canFolder = currentPath.length > 0;
+  if (!canFolder && searchScope === 'folder') searchScope = 'all';
+  box.querySelectorAll('.scope-btn').forEach(b => {
+    const on = b.dataset.scope === searchScope;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    if (b.dataset.scope === 'folder') {
+      b.disabled = !canFolder;
+      b.title = canFolder ? 'Искать только в текущей папке' : 'Сначала выберите папку';
+    }
+  });
+}
+// Переключить область поиска и сразу пересчитать список/фасеты.
+function setSearchScope(scope) {
+  searchScope = scope === 'folder' ? 'folder' : 'all';
+  hideSearchSuggest();
+  renderSearchScope();
+  renderNotes();
+  renderBreadcrumbs();
+  renderFacets();
+  saveLastView();
+}
+// Очистить поле и вернуть обычный список текущей папки.
+function clearSearchField() {
+  const input = document.getElementById('search');
+  if (input) input.value = '';
+  onSearch('');
+}
 function onSearch(v) {
   searchQuery = v.trim();
+  renderSearchScope();
   if (viewingId) { viewingId = null; renderNoteView(); }
   renderNotes();
   renderBreadcrumbs();
   updateSearchSuggest();
   renderFacets();
+  saveLastView();
 }
 // Нечёткое совпадение: все символы запроса встречаются по порядку (subsequence).
 function fuzzyMatch(query, target) {
@@ -2877,8 +3040,9 @@ function renderFacets() {
   cntEl.textContent = activeCount ? '(' + activeCount + ')' : '';
   if (resetBtn) resetBtn.style.display = activeCount ? 'inline-block' : 'none';
 
-  // Набор заметок, прошедших ВСЕ включённые фильтры.
+  // Набор заметок, прошедших область поиска и ВСЕ включённые фильтры.
   const included = state.notes.filter(n => {
+    if (!inSearchScope(n)) return false;
     const nt = tagsLowerOf(n);
     for (const t of inc) if (!nt.includes(t)) return false;
     return true;
@@ -3013,6 +3177,7 @@ function deleteView(name) {
   renderViews();
 }
 function applyView(query) {
+  searchScope = 'all';
   document.getElementById('search').value = query;
   onSearch(query);
 }
@@ -3209,6 +3374,7 @@ async function writeToFileHandle(handle, payload, savedState) {
 function resetNavigation() {
   currentPath = [];
   searchQuery = '';
+  searchScope = 'all';
   collapsed = new Set();
   editingId = null;
   selectedId = null;
@@ -3216,6 +3382,7 @@ function resetNavigation() {
   currentTags = [];
   const s = document.getElementById('search');
   if (s) s.value = '';
+  renderSearchScope();
   saveCollapsed(true);
 }
 
@@ -4075,18 +4242,31 @@ function dialogPrompt(label, value) {
 
 // ---------- Shortcut ----------
 document.addEventListener('keydown', e => {
-  // Ctrl/Cmd+K — фокус в поле поиска
+  // Ctrl/Cmd+K — единый быстрый переход: папки/тэги, заметки, команды.
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault();
-    const search = document.getElementById('search');
-    search.focus();
-    search.select();
+    if (document.getElementById('paletteMask').classList.contains('show')) closePalette(); else openPalette();
     return;
   }
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'p') {
     e.preventDefault();
     if (document.getElementById('paletteMask').classList.contains('show')) closePalette(); else openPalette();
     return;
+  }
+  // «/» — быстрый фокус в обычный поиск (когда не печатаем и не открыт диалог).
+  if ((e.key === '/' || e.code === 'Slash') && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+    const t = e.target;
+    const typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+    const modal = document.getElementById('modalMask');
+    const pal = document.getElementById('paletteMask');
+    const dlg = document.getElementById('dialogMask');
+    if (!typing && !(modal && modal.classList.contains('show')) && !(pal && pal.classList.contains('show')) && !(dlg && dlg.classList.contains('show'))) {
+      e.preventDefault();
+      const search = document.getElementById('search');
+      search.focus();
+      search.select();
+      return;
+    }
   }
   // Ctrl+Z — отмена последнего опасного действия (вне полей ввода и редактора).
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z' && !e.shiftKey) {
@@ -4170,6 +4350,18 @@ function attachEvents() {
   $('notes').addEventListener('keydown', notesKeyNav);
   // Делегирование событий карточек: один обработчик вместо тысяч замыканий.
   $('notes').addEventListener('click', (e) => {
+    const pathBtn = e.target.closest('#notes .note-path .np-show');
+    if (pathBtn) {
+      e.preventDefault();
+      e.stopPropagation();
+      let path = [];
+      try { path = JSON.parse(pathBtn.dataset.path || '[]'); } catch (err) {}
+      const input = document.getElementById('search');
+      if (input) input.value = '';
+      onSearch('');
+      goToPathRevealed(Array.isArray(path) ? path : []);
+      return;
+    }
     const tagEl = e.target.closest('#notes .tag');
     if (tagEl) {
       const t = tagEl.textContent;
@@ -4183,7 +4375,7 @@ function attachEvents() {
   });
   // Двойной клик по карточке — сразу в редактор (одиночный открывает просмотр).
   $('notes').addEventListener('dblclick', (e) => {
-    if (e.target.closest('.tag')) return; // двойной клик по тэгу — не редактор
+    if (e.target.closest('.tag') || e.target.closest('.np-show')) return; // не редактор
     const card = e.target.closest('#notes .note-card');
     if (card) openEditor(card.dataset.noteId);
   });
@@ -4232,14 +4424,21 @@ function attachEvents() {
   });
   $('search').addEventListener('keydown', (e) => {
     const box = document.getElementById('searchSuggest');
-    if (!box.classList.contains('show')) return;
-    const items = [...box.querySelectorAll('.sugg')];
+    const items = box.classList.contains('show') ? [...box.querySelectorAll('.sugg')] : [];
+    if (e.key === 'Escape') {
+      if (box.classList.contains('show')) { e.preventDefault(); hideSearchSuggest(); }
+      else if (searchQuery) { e.preventDefault(); clearSearchField(); }
+      return;
+    }
     if (items.length === 0) return;
     const idx = items.findIndex(el => el.classList.contains('active'));
     if (e.key === 'ArrowDown') { e.preventDefault(); items[(idx + 1) % items.length].classList.add('active'); if (idx >= 0) items[idx].classList.remove('active'); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); items[(idx - 1 + items.length) % items.length].classList.add('active'); if (idx >= 0) items[idx].classList.remove('active'); }
     else if (e.key === 'Enter' && idx >= 0) { e.preventDefault(); items[idx].click(); }
-    else if (e.key === 'Escape') { hideSearchSuggest(); }
+  });
+  $('searchScope').addEventListener('click', (e) => {
+    const b = e.target.closest('.scope-btn');
+    if (b) setSearchScope(b.dataset.scope);
   });
   $('sortBtn').addEventListener('click', (e) => {
     e.stopPropagation();
@@ -4321,7 +4520,6 @@ function startApp() {
   restoreLastView();
   initTreeCollapse();
   renderAll();
-  renderFacets();
   renderViews();
   requestPersistentStorage();
   restoreFileHandle(); // восстановить привязку файла (асинхронно, если была)
@@ -4349,7 +4547,8 @@ if (window) {
     isValidData, normalizeNote, renderMarkdown, highlightElement, parseLocalDate, byteLength,
     renderAll, renderNotes, renderBreadcrumbs, notesInPath, onSearch, resetNavigation, closeEditor,
     sortNotes, tagCount, tagColor, setTagColor, moveNoteToTag, pushHistory, restoreHistory,
-    setSortMode, sortMenu, printNotes, parseQuery, tokenizeQuery, tagToken, matchesSearch, fuzzyMatch,
+    setSortMode, sortMenu, printNotes, parseQuery, tokenizeQuery, tagToken, matchesSearch, matchesSearchScoped, fuzzyMatch,
+    setSearchScope, searchScopeNotes, renderSearchScope, clearSearchField, goToPathRevealed, revealTreePath, paletteScore,
     setMdMode, applyMdFormat, updateMdPreview, updateMdWordCount, mdMode,
     updateSearchSuggest, applySearchSuggest, getParsedQuery, tagCounts, notesInFolder, submenuFor,
     closeSidebar, toggleSidebar, storageProbe, showDiagnostics, restoreFromBackup,
@@ -4375,6 +4574,7 @@ if (window) {
     get idbError() { return idbError; },
     get currentPath() { return currentPath; },
     set currentPath(v) { currentPath = Array.isArray(v) ? v : []; },
+    get searchScope() { return searchScope; },
     renderFacets, cycleFacet, toggleFacets, addView, deleteView, applyView, loadViews, resetFacets,
     get collapsed() { return collapsed; },
     get sortMode() { return sortMode; }

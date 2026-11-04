@@ -122,6 +122,85 @@ describe('Поиск и разбор запроса', () => {
     app.onSearch('хлеб');        strictEqual(app.matchesSearch(n), true);
     app.onSearch('молоко');      strictEqual(app.matchesSearch(n), false);
   });
+
+  test('область «В папке» ограничивает поиск текущей веткой', () => {
+    seed(
+      [{ id: 't1', name: 'a' }, { id: 't2', name: 'b' }],
+      [
+        { id: 'n1', title: 'Общая', body: 'текст', tagIds: ['t1'] },
+        { id: 'n2', title: 'Общая', body: 'текст', tagIds: ['t2'] }
+      ]
+    );
+    app.currentPath = ['a'];
+    app.onSearch('общая');
+    strictEqual(document.querySelectorAll('#notes .note-card').length, 2);
+    app.setSearchScope('folder');
+    strictEqual(document.querySelectorAll('#notes .note-card').length, 1);
+    strictEqual(document.querySelector('#notes .note-card').dataset.noteId, 'n1');
+    strictEqual(document.getElementById('searchScope').querySelector('.scope-btn[data-scope="folder"]').classList.contains('active'), true);
+    app.setSearchScope('all');
+    strictEqual(document.querySelectorAll('#notes .note-card').length, 2);
+  });
+
+  test('область «В папке» недоступна в корне', () => {
+    seed([], [{ id: 'n1', title: 'Без тэга', tagIds: [] }]);
+    app.renderAll();
+    const btn = document.querySelector('#searchScope .scope-btn[data-scope="folder"]');
+    strictEqual(btn.disabled, true);
+    strictEqual(btn.classList.contains('active'), false);
+  });
+
+  test('в результатах поиска виден путь и кнопка перехода в дерево', () => {
+    seed(
+      [{ id: 't1', name: 'a' }, { id: 't2', name: 'b' }],
+      [{ id: 'n1', title: 'Найдено', body: 'текст', tagIds: ['t1', 't2'] }]
+    );
+    app.onSearch('найдено');
+    const path = document.querySelector('#notes .note-path');
+    ok(path, 'строка пути отрендерена');
+    ok(path.textContent.includes('a / b'));
+    app.collapseAllTree();
+    path.querySelector('.np-show').click();
+    deepEqual(app.currentPath, ['a', 'b']);
+    strictEqual(document.getElementById('search').value, '');
+    ok(document.querySelector('#tree .node-row[data-path="a/b"]'), 'ветка раскрыта в дереве');
+  });
+});
+
+describe('Быстрый переход (Ctrl+K)', () => {
+  test('открывается по Ctrl+K и группирует команды, тэги и заметки', () => {
+    seed(
+      [{ id: 't1', name: 'работа' }],
+      [{ id: 'n1', title: 'План проекта', body: 'текст', tagIds: ['t1'] }]
+    );
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true }));
+    const mask = document.getElementById('paletteMask');
+    strictEqual(mask.classList.contains('show'), true);
+    const input = document.getElementById('paletteInput');
+    input.value = '#раб';
+    app.renderPalette();
+    const groups = [...document.querySelectorAll('#paletteList .palette-group')].map(e => e.textContent);
+    deepEqual(groups, ['Папки и тэги']);
+    const item = document.querySelector('#paletteList .palette-item');
+    ok(item && item.textContent.includes('#работа'));
+    item.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    strictEqual(mask.classList.contains('show'), false);
+    deepEqual(app.currentPath, ['работа']);
+  });
+
+  test('префикс @ ищет заметки по заголовку и тэгам', () => {
+    seed(
+      [{ id: 't1', name: 'работа' }],
+      [{ id: 'n1', title: 'План проекта', body: 'текст', tagIds: ['t1'] }]
+    );
+    app.openPalette();
+    document.getElementById('paletteInput').value = '@план';
+    app.renderPalette();
+    const items = [...document.querySelectorAll('#paletteList .palette-item')];
+    ok(items.some(it => it.textContent.includes('План проекта')));
+    ok(items.every(it => !it.textContent.includes('🏷️')));
+    app.closePalette();
+  });
 });
 
 describe('Markdown', () => {

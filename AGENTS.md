@@ -37,15 +37,15 @@
 | Notifications | `notify` |
 | Tags / permutations | `permute`, `tagsOf`, `tagsLowerOf`, `pathTagsOf`, `notePaths`, `allTags`, `noteBelongsToPath`, `invalidateTree`, `buildTree` |
 | Tree model / Rendering | `renderTree/renderNode`, `buildChildren`, `updateRowState`, `applyTreeState`, `toggleFolder`, `treeHandleClick/ContextMenu/DragOver/DragLeave/Drop`, `renderBreadcrumbs`, `renderNotes`, `previewText`, `safeCssColor`, `renderAll`, `isPathActive`, `expandAllTree/collapseAllTree/initTreeCollapse`, `allCollapsedExcept`, `humanDate`, `notesKeyNav/treeKeyNav` |
-| Просмотр заметки | `openNoteView/closeNoteView/renderNoteView`, `goToPath`, `findNoteCard/resetNoteListWidth` |
-| Командная палитра | `paletteCommands`, `openPalette/closePalette/renderPalette/paletteKey` |
+| Просмотр заметки | `openNoteView/closeNoteView/renderNoteView`, `goToPath`, `goToPathRevealed/revealTreePath`, `findNoteCard/resetNoteListWidth` |
+| Командная палитра | `paletteCommands`, `paletteScore`, `openPalette/closePalette/renderPalette/paletteKey` |
 | Markdown | `escapeHtml`, `renderMarkdown`, `queryTerms`, `highlightElement` |
 | Note selection / editor | `selectNote` (открывает просмотр), `openEditor/closeEditor`, `editorDirty/requestCloseEditor`, `saveNote/deleteNote`, `addTagInput/addTag/removeTag/renderTagBadges/renderTagHints/tagInputKey`, `updateTagSuggest/applyTagSuggest` |
 | Markdown-предпросмотр | `updateMdPreview`, `updateMdWordCount`, `syncMdScroll`, `setMdMode`, `scheduleMdPreview/cancelMdPreview` |
 | Тулбар Markdown | `applyMdFormat` |
 | Поиск и замена в редакторе | `openFindBar/closeFindBar/mdFindNext/mdReplaceOne/mdReplaceAll` |
 | Оглавление | `updateMdToc` |
-| Search | `onSearch`, `tokenizeQuery/parseLocalDate/parseQuery/getParsedQuery/tagToken`, `matchesSearch`, `notesInPath`, `fuzzyMatch`, `updateSearchSuggest/applySearchSuggest` |
+| Search | `onSearch`, `setSearchScope/renderSearchScope/clearSearchField`, `inSearchScope/matchesSearchScoped/searchScopeNotes`, `tokenizeQuery/parseLocalDate/parseQuery/getParsedQuery/tagToken`, `matchesSearch`, `notesInPath`, `fuzzyMatch`, `updateSearchSuggest/applySearchSuggest` |
 | Фасеты | `renderFacets/cycleFacet/resetFacets/toggleFacets` |
 | Сохранённые представления | `loadViews/saveViews/addView/deleteView/applyView/renderViews/promptSaveView` |
 | Theme | `toggleTheme/applyTheme` |
@@ -102,7 +102,7 @@ state.tags = [{ id: 't…', name: 'работа', color?: '#8b5cf6' }]
 | `noteTreeCollapsed` | LS | JSON-массив ключей свёрнутых папок (`'работа/проект'`) |
 | `noteTreeCollapsedDefaulted` | LS | `'1'` — стартовое сворачивание дерева уже применено |
 | `noteTreeSort` | LS | `'updated'` / `'created'` / `'title'` |
-| `noteTreeLastView` | LS | `{ path: [...], q: '…' }` — последнее место |
+| `noteTreeLastView` | LS | `{ path: [...], q: '…', scope: 'all'\|'folder' }` — последнее место |
 | `noteTreeViews` | LS | сохранённые представления (фильтры) |
 | `noteTreeFileName` | LS | имя привязанного файла (для диагностики) |
 | IndexedDB `noteTreeFileHandle` | IDB | дескриптор файла (File System Access API) |
@@ -141,8 +141,8 @@ buildTree()             // { name, ids: Set, children: Map }
 ## Рендеринг
 
 ```js
-renderAll(opts) → renderTree() + renderBreadcrumbs() + renderNotes() + renderNoteView() + saveLastView()
-// opts: { tree, crumbs, notes, noteView, view } — любой можно выключить (false)
+renderAll(opts) → renderSearchScope() + renderTree() + renderBreadcrumbs() + renderFacets() + renderNotes() + renderNoteView() + saveLastView()
+// opts: { tree, crumbs, facets, notes, noteView, view } — любой можно выключить (false)
 ```
 
 - **Дерево инкрементальное.** `treeRows` — реестр «ключ пути → узел» (`row`, `chev`, `icon`, `childrenDiv`, `node`). `renderTree()` пересобирает DOM только когда `treeDirty` (его поднимает `invalidateTree()`), иначе вызывает `applyTreeState()`: обновляет `.active`, шевроны, цвета и видимость детей на месте. Поэтому переход по папкам, поиск и `renderAll({ tree: false })` не пересоздают сотни строк.
@@ -152,15 +152,18 @@ renderAll(opts) → renderTree() + renderBreadcrumbs() + renderNotes() + renderN
 - **Карточки** (`renderNotes`) собираются одной HTML-строкой и вставляются одним `innerHTML`. Пользовательский текст — только через `escapeHtml`, превью — через `renderMarkdown`; цвета тэгов проходят `safeCssColor` (hex/rgb/hsl/имя цвета), чтобы импортированные данные не попали в `style`. Подсветка — после вставки, по `.preview`.
 - **Просмотр заметки** (`.content-split` + `#noteView`): клик по карточке (`selectNote` → `openNoteView`) показывает заметку целиком справа — заголовок, тэги, даты и полный Markdown (`renderMarkdown`). Список при этом сужается до одной колонки (`.has-view`), но карточка не меняет размер: `openNoteView` запоминает её ширину до открытия, выставляет ширину списка через `notes.style.flex` и при необходимости корректирует её; `resetNoteListWidth()` снимает фиксацию при закрытии. Прокрутка не сбрасывается: `openNoteView` только переключает `.selected` на существующих карточках и при необходимости `scrollIntoView`. Редактор открывается двойным кликом, кнопкой «✎ Редактировать» или из контекстного меню. Шапка `.nv-head` («✕ Закрыть» и «✎ Редактировать») закреплена, а прокручивается только текст в `.nv-scroll`, поэтому кнопки всегда видны. Закрытие — «✕ Закрыть» / Esc / «← К списку» на узких экранах (≤900px список скрывается). `renderNoteView` при отсутствии заметки сам закрывает панель (удаление, импорт), а `goToPath` и `onSearch` сбрасывают `viewingId`, чтобы не показывать заметку вне контекста.
 - **Обработчики просмотра делегированы** на `#noteView` (`.nv-close`, `.nv-edit`, `.nv-tags .tag`); `#notes` дополнительно слушает `dblclick`.
-- **Крошки** (`renderBreadcrumbs`): «🏠 Все без тэга» → сегменты `currentPath`; счётчик справа — «N найдено» при поиске, иначе «N заметок».
-- **Список**: при непустом `searchQuery` — глобальный поиск по всем заметкам, иначе — `notesInPath()`. Затем `sortNotes()` и закреплённые (`pinned`) наверх. Карточка `.note-card`: заголовок, превью (`previewText` → Markdown, обрезка 140 символов + `…`; строки таблиц выкидываются — в 96px они нечитаемы), кликабельные тэги, человекочитаемая дата; drag-and-drop в папку (`text/note-id`); `tabIndex` и клавиатурная навигация.
-- Пустые состояния: «Ничего не найдено», «В этой папке пока нет заметок», а при полностью пустом архиве — экран переноса с кнопкой «📂 Открыть файл данных».
+- **Крошки** (`renderBreadcrumbs`): «🏠 Все без тэга» → сегменты `currentPath`; счётчик справа — «N найдено» (в режиме «В папке» — «N найдено в папке») при поиске, иначе «N заметок».
+- **Список**: при непустом `searchQuery` — поиск по области `searchScope` (`searchScopeNotes()`), иначе — `notesInPath()`. Затем `sortNotes()` и закреплённые (`pinned`) наверх. Карточка `.note-card`: заголовок, превью (`previewText` → Markdown, обрезка 140 символов + `…`; строки таблиц выкидываются — в 96px они нечитаемы), кликабельные тэги, человекочитаемая дата; drag-and-drop в папку (`text/note-id`); `tabIndex` и клавиатурная навигация. В результатах поиска дополнительно показывается путь заметки (`pathTagsOf` → «a / b», для корня — «Без тэга») и кнопка «в дереве» (`.np-show` → `goToPathRevealed`), которая очищает поиск, раскрывает нужную ветку и переходит в неё.
+- Пустые состояния: «Ничего не найдено» / «В этой папке ничего не найдено» (по области), «В этой папке пока нет заметок», а при полностью пустом архиве — экран переноса с кнопкой «📂 Открыть файл данных».
 - `humanDate`: «только что», «N мин назад», «сегодня, ЧЧ:ММ», «вчера, ЧЧ:ММ», затем дата (`12 окт` / с годом).
-- `saveLastView()` пишет в `localStorage` только при изменении пути/запроса и с задержкой 250 мс (`deferSetting`); очередь сбрасывается на `pagehide`/`visibilitychange`, поэтому при закрытии вкладки место всё равно сохраняется.
+- `saveLastView()` пишет в `localStorage` только при изменении пути/запроса/области и с задержкой 250 мс (`deferSetting`); очередь сбрасывается на `pagehide`/`visibilitychange`, поэтому при закрытии вкладки место всё равно сохраняется.
 
 ## Поиск
 
-`onSearch(v)` пишет `searchQuery`, закрывает открытый просмотр (`viewingId = null`) и перерисовывает `renderNotes()` + `renderBreadcrumbs()`. Поле `#search` вызывает его с debounce 120 мс; прямые вызовы (`onSearch('')`, фасеты, представления, автодополнение) — синхронные.
+`onSearch(v)` пишет `searchQuery`, закрывает открытый просмотр (`viewingId = null`) и перерисовывает `renderNotes()` + `renderBreadcrumbs()` + `renderFacets()` + `renderSearchScope()`, сохраняя место. Поле `#search` вызывает его с debounce 120 мс; прямые вызовы (`onSearch('')`, фасеты, представления, автодополнение) — синхронные.
+
+- **Область поиска** (`searchScope`, кнопки «Везде» / «В папке» под полем): `setSearchScope('all'|'folder')` переключает и сразу пересчитывает список, крошки и фасеты. В корне (`currentPath` пуст) режим «В папке» недоступен (`renderSearchScope` отключает кнопку и сбрасывает область на `all`). `inSearchScope(n)` ограничивает набор `currentPath`, `matchesSearchScoped(n)` = область + `matchesSearch(n)`, `searchScopeNotes()` — готовый список. Этой областью пользуются список, крошки, фасеты и «Экспорт найденного». Сохранённые представления применяются с областью «Везде».
+- **Клавиши**: `/` (не в поле ввода) фокусирует `#search` и выделяет текст; `Esc` в поле сначала закрывает автодополнение, затем очищает запрос (`clearSearchField`).
 
 Синтаксис (`tokenizeQuery` → `parseQuery`, результат кэшируется `getParsedQuery()`):
 
@@ -183,7 +186,7 @@ renderAll(opts) → renderTree() + renderBreadcrumbs() + renderNotes() + renderN
 ## Менеджер тэгов и командная палитра
 
 - **Менеджер тэгов** («🏷️»): `openTagManager/renderTagManager`. Список всех тэгов с цветной точкой, именем, числом заметок и действиями: цвет (`TAG_COLORS`, `setTagColor`), переименовать (`renameTag`), слить (`mergeTags`), удалить (`deleteTag`). Есть поиск по подстроке (`#tmSearch`), сводка («N тэгов» или «M из N тэгов»), уборка пустых тэгов (`removeOrphanTags`) и подсветка похожих имён (`findSimilarTagNames` — Левенштейн, `highlightSimilarTags`).
-- **Командная палитра** (`Ctrl+P`): команды из `paletteCommands()` (создать, менеджер тэгов, экспорт/импорт, печать, тема, версии, корзина, отмена, диагностика, свернуть/развернуть, корень), затем тэги и до 20 заметок. Навигация ↑/↓, Enter, Esc; пункты запускаются по `mousedown`, чтобы не терять фокус.
+- **Командная палитра** (`Ctrl+K`, алиас `Ctrl+P`): единый быстрый переход. `openPalette` открывает `#paletteMask`; `renderPalette` собирает группы «Команды» (`paletteCommands()`), «Папки и тэги» (`allTags()`), «Заметки» и «Сохранённые фильтры» (`loadViews()`). Нечёткий отбор и сортировка — `paletteScore` (точное совпадение → начало → подстрока → subsequence, иначе отбрасывается); заметки ищутся по заголовку и строке тэгов. Префиксы: `>` — только команды, `#` — только тэги, `@` — только заметки. Заметки ограничены 10 последними (по `updated`), тэги — 12, фильтры — 6. Переход к тэгу очищает поиск и раскрывает ветку (`goToPathRevealed`). Навигация ↑/↓, Enter, Esc; пункты запускаются по `mousedown`, чтобы не терять фокус.
 
 ## Редактор заметок
 
@@ -244,7 +247,7 @@ renderAll(opts) → renderTree() + renderBreadcrumbs() + renderNotes() + renderN
   - Тулбар Markdown на мобильных не переносится, а прокручивается по горизонтали (`.md-toolbar`), экономя высоту редактора.
   - Учтены `env(safe-area-inset-*)`, `max-height` модалок в `dvh`, `interactive-widget=resizes-content` во viewport: клавиатура не прячет футер редактора.
   - «Удалить / Отмена / Сохранить» на ≤400px ужимаются по горизонтали, чтобы не вылезать за модалку.
-- Горячие клавиши: `Ctrl/Cmd+N` — новая заметка (не в полях и не при открытом редакторе), `Ctrl/Cmd+K` — фокус в поиск, `Ctrl/Cmd+P` — палитра, `Ctrl/Cmd+Z` — отмена опасного действия, `Ctrl/Cmd+H` — поиск/замена в редакторе, `Esc` — закрыть редактор/просмотр заметки/палитру/подсказки, `↑/↓/Enter/→/←` — навигация по дереву и карточкам.
+- Горячие клавиши: `Ctrl/Cmd+N` — новая заметка (не в полях и не при открытом редакторе), `Ctrl/Cmd+K` — быстрый переход (палитра; `Ctrl/Cmd+P` — алиас), `/` — фокус в поиск, `Ctrl/Cmd+Z` — отмена опасного действия, `Ctrl/Cmd+H` — поиск/замена в редакторе, `Esc` — закрыть редактор/просмотр заметки/палитру/подсказки или очистить поиск, `↑/↓/Enter/→/←` — навигация по дереву, карточкам, палитре и автодополнению.
 - Контекстное меню (`#ctxMenu`): на папке — создать заметку, переименовать/удалить тэг, цвет, экспорт папки (MD/TXT), печать, открыть; на заметке — редактировать, дублировать, переместить, закрепить, история, экспорт, печать, удалить. Позиционируется с учётом границ экрана; подменю использует последнюю позицию (`lastCtxPos`), а не угол (0,0). Пункты меню запускаются через `runItem()` с перехватом async-ошибок.
 - Диалоги вместо `prompt`/`confirm`: `dialogShow/dialogConfirm/dialogPrompt` (Promise), `#dialogMask`. Браузерные `prompt`/`confirm`/`alert` в проекте не используются.
 
@@ -263,7 +266,7 @@ renderAll(opts) → renderTree() + renderBreadcrumbs() + renderNotes() + renderN
 node tests/run_test.js tests/note_tree.test.js
 ```
 
-или `cd tests && npm test`. Сейчас: **75 тестов, все проходят**.
+или `cd tests && npm test`. Сейчас: **80 тестов, все проходят**.
 
 - `tests/run_test.js` загружает `tag-tree.html` в jsdom (инлайновый `<script>` выполняется целиком) и выставляет глобальные `describe/test/it/beforeEach/afterEach`, `assert` (Node `assert`, **не** strict), `app` (= `window.__app`), `resetApp()`, `window`, `document`.
 - `beforeEach`/`afterEach` на верхнем уровне — глобальные (для всех тестов), внутри `describe` — локальные. В тестах зарегистрирован `beforeEach(resetApp)`.
@@ -273,7 +276,7 @@ node tests/run_test.js tests/note_tree.test.js
 - jsdom установлен один раз в `tests/node_modules`; не переустанавливать и не удалять.
 - Тесты опираются на `window.__app` — при переименовании/переносе функций синхронизируйте список экспорта.
 
-Что покрыто: дерево по перестановкам и счётчики, корневые заметки, `noteBelongsToPath`, `MAX_PERM_TAGS`; миграция старого формата, дедупликация тэгов и перенаправление ссылок, отбрасывание пустых, `isValidData`; разбор запроса (`#тэг`, `-тэг`, `title:`, `since/until` с пробелом), `matchesSearch`; Markdown (списки/чекбоксы, таблицы внутри кода, обёртка таблиц для прокрутки, пустые строки-разделители абзацев, XSS, схемы ссылок); превью карточек без таблиц; подсветка поиска; `restoreLastView` (многосегментный путь); `moveNoteToTag`, `cycleFacet`, `renameTag`; корзина/undo, меню «Версии данных» (открытие и переключение); `byteLength`; доступность фасетов; интеграция редактора (`openEditor`, `saveNote`, рендер с подсветкой); делегирование событий карточек и дерева, инкрементальное дерево (тот же DOM при клике, кэш детей), стартовое сворачивание дерева и сохранённая свёрнутость, `renderAll({ tree:false })`, инвалидация кэшей (`tagsLowerOf`, термы подсветки), `saveLastView` без лишних записей (с явным `flushDeferredSettings`), отложенный предпросмотр; слой хранения — `storageInit` без IndexedDB, миграция localStorage→IndexedDB, отсутствие тяжёлых ключей в localStorage, `loadState` из базы, снимки/корзина в базе, `storageProbe` с `idbMode`, устойчивость к сбою записи при миграции; **надёжность записи** — восстановление из backup и из снимка при повреждённом JSON, отсутствие ложного «восстановлено» на целых данных, кэш снимков и корзины, повтор записи после временного сбоя базы, освобождение места (`relieveQuota`), `withTimeout` для зависшей инициализации, отсутствие аварийного экрана при старте; просмотр заметки — полный текст без обрезки, закреплённая шапка с кнопками, Markdown и XSS, двойной клик/кнопка открывают редактор, закрытие кнопкой и Esc, обновление после сохранения, закрытие при удалении/смене папки/тэге/поиске/`resetNavigation`, `renderAll({ noteView: false })` не трогает панель, неизвестный id, фиксация/сброс ширины списка при открытии/закрытии, сохранение DOM списка.
+Что покрыто: дерево по перестановкам и счётчики, корневые заметки, `noteBelongsToPath`, `MAX_PERM_TAGS`; миграция старого формата, дедупликация тэгов и перенаправление ссылок, отбрасывание пустых, `isValidData`; разбор запроса (`#тэг`, `-тэг`, `title:`, `since/until` с пробелом), `matchesSearch`; Markdown (списки/чекбоксы, таблицы внутри кода, обёртка таблиц для прокрутки, пустые строки-разделители абзацев, XSS, схемы ссылок); превью карточек без таблиц; подсветка поиска; `restoreLastView` (многосегментный путь); `moveNoteToTag`, `cycleFacet`, `renameTag`; корзина/undo, меню «Версии данных» (открытие и переключение); `byteLength`; доступность фасетов; интеграция редактора (`openEditor`, `saveNote`, рендер с подсветкой); делегирование событий карточек и дерева, инкрементальное дерево (тот же DOM при клике, кэш детей), стартовое сворачивание дерева и сохранённая свёрнутость, `renderAll({ tree:false })`, инвалидация кэшей (`tagsLowerOf`, термы подсветки), `saveLastView` без лишних записей (с явным `flushDeferredSettings`), отложенный предпросмотр; слой хранения — `storageInit` без IndexedDB, миграция localStorage→IndexedDB, отсутствие тяжёлых ключей в localStorage, `loadState` из базы, снимки/корзина в базе, `storageProbe` с `idbMode`, устойчивость к сбою записи при миграции; **надёжность записи** — восстановление из backup и из снимка при повреждённом JSON, отсутствие ложного «восстановлено» на целых данных, кэш снимков и корзины, повтор записи после временного сбоя базы, освобождение места (`relieveQuota`), `withTimeout` для зависшей инициализации, отсутствие аварийного экрана при старте; просмотр заметки — полный текст без обрезки, закреплённая шапка с кнопками, Markdown и XSS, двойной клик/кнопка открывают редактор, закрытие кнопкой и Esc, обновление после сохранения, закрытие при удалении/смене папки/тэге/поиске/`resetNavigation`, `renderAll({ noteView: false })` не трогает панель, неизвестный id, фиксация/сброс ширины списка при открытии/закрытии, сохранение DOM списка; поиск — область «В папке» ограничивает выдачу, недоступность области в корне, путь и кнопка «в дереве» в результатах; быстрый переход `Ctrl+K` — открытие, группировка, префикс `@`, переход к тэгу.
 
 ## Правила при правках
 
