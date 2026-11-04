@@ -4,7 +4,7 @@
 
 **Открыть приложение:** [ai-master8.github.io/ai-docs](https://ai-master8.github.io/ai-docs/)
 
-Всё приложение — один самодостаточный файл [`note-tree.html`](note-tree.html): без сборки, зависимостей, CDN и внешних ресурсов.
+Всё приложение — один самодостаточный файл [`tag-tree.html`](tag-tree.html): без сборки, зависимостей, CDN и внешних ресурсов.
 
 ## Возможности
 
@@ -26,12 +26,12 @@
 
 ### Локально
 
-1. Скачайте [`note-tree.html`](note-tree.html).
+1. Скачайте [`tag-tree.html`](tag-tree.html).
 2. Откройте файл двойным кликом или через локальный сервер:
 
 ```bash
 python3 -m http.server 8000
-# затем http://localhost:8000/note-tree.html
+# затем http://localhost:8000/tag-tree.html
 ```
 
 > При открытии через `file://` в Chromium хранилище привязано к **папке** с файлом, а не к самому файлу. Перенос HTML в другую папку или смена профиля браузера означает «нет данных». Для переноса между машинами используйте экспорт JSON или привязанный файл.
@@ -84,19 +84,19 @@ npm install
 npm test
 ```
 
-Сейчас: **64 теста, все проходят**. Тесты работают в jsdom, загружая `note-tree.html` целиком.
+Сейчас: **64 теста, все проходят**. Тесты работают в jsdom, загружая `tag-tree.html` целиком.
 
 ## Структура
 
 ```
-note-tree.html          # всё приложение: HTML + CSS + JS
+tag-tree.html          # всё приложение: HTML + CSS + JS
 AGENTS.md               # техническая документация и правила разработки
 tests/
   run_test.js           # мини-раннер на jsdom
   note_tree.test.js     # тесты
   package.json          # dev-зависимость jsdom
 note-tree.json          # пример экспорта
-index.html              # редирект на note-tree.html для GitHub Pages
+index.html              # редирект на tag-tree.html для GitHub Pages
 ```
 
 ## Документация

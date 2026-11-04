@@ -1,7 +1,7 @@
 'use strict';
 
 /*
- * Тесты для note-tree.html.
+ * Тесты для tag-tree.html.
  * Запуск: node tests/run_test.js tests/note_tree.test.js
  *
  * Доступны глобальные: describe, test, it, beforeEach, afterEach,

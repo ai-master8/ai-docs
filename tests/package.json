@@ -2,7 +2,7 @@
   "name": "ai-docs-tests",
   "version": "1.0.0",
   "private": true,
-  "description": "jsdom-тесты для однофайлового приложения note-tree.html",
+  "description": "jsdom-тесты для однофайлового приложения tag-tree.html",
   "scripts": {
     "test": "node run_test.js note_tree.test.js"
   },

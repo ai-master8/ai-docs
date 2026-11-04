@@ -6,22 +6,22 @@
 
 «TagTree» — личное однофайловое веб-приложение для иерархических заметок. Иерархия задаётся не папками, а **тэгами**: для заметки с тэгами `[работа, проект]` в дереве появляются обе ветки — `работа → проект` и `проект → работа` (все перестановки). Заметка без тэгов попадает в корень «Все без тэга».
 
-- **Нет сборки и нет зависимостей у самого приложения.** `note-tree.html` — HTML + CSS + JS в одном файле (~4000 строк) и должен оставаться самодостаточным: никаких `<script src>`, `<link href>`, CDN, внешних шрифтов и картинок.
+- **Нет сборки и нет зависимостей у самого приложения.** `tag-tree.html` — HTML + CSS + JS в одном файле (~4000 строк) и должен оставаться самодостаточным: никаких `<script src>`, `<link href>`, CDN, внешних шрифтов и картинок.
 - Интерфейс, комментарии и документация — на русском.
 - `tests/package.json` — единственный `package.json` в проекте; он нужен только для dev-зависимости `jsdom` (установлена в `tests/node_modules`).
-- Запуск: двойной клик по `note-tree.html` (`file://`) или через локальный сервер (`http://localhost`). Заметки, снимки и корзина лежат в IndexedDB, настройки — в `localStorage` (при `file://` корпоративный Chromium может его блокировать, тогда не сохранятся только настройки) — см. «Хранение».
+- Запуск: двойной клик по `tag-tree.html` (`file://`) или через локальный сервер (`http://localhost`). Заметки, снимки и корзина лежат в IndexedDB, настройки — в `localStorage` (при `file://` корпоративный Chromium может его блокировать, тогда не сохранятся только настройки) — см. «Хранение».
 
 Файлы:
 
 | Путь | Что это |
 |---|---|
-| `note-tree.html` | всё приложение — источник истины |
+| `tag-tree.html` | всё приложение — источник истины |
 | `tests/run_test.js` | мини-раннер: грузит приложение в jsdom |
 | `tests/note_tree.test.js` | сами тесты |
 | `tests/package.json` | dev-зависимость `jsdom`, скрипт `npm test` |
 | `note-tree.json` | пример экспорта (схема v2), не исходник |
 
-## Карта кода `note-tree.html`
+## Карта кода `tag-tree.html`
 
 Порядок: `<head>` + `<style>` → разметка `<body>` → `<script>` → тест-хук `window.__app` в самом конце.
 
@@ -260,7 +260,7 @@ node tests/run_test.js tests/note_tree.test.js
 
 или `cd tests && npm test`. Сейчас: **64 теста, все проходят**.
 
-- `tests/run_test.js` загружает `note-tree.html` в jsdom (инлайновый `<script>` выполняется целиком) и выставляет глобальные `describe/test/it/beforeEach/afterEach`, `assert` (Node `assert`, **не** strict), `app` (= `window.__app`), `resetApp()`, `window`, `document`.
+- `tests/run_test.js` загружает `tag-tree.html` в jsdom (инлайновый `<script>` выполняется целиком) и выставляет глобальные `describe/test/it/beforeEach/afterEach`, `assert` (Node `assert`, **не** strict), `app` (= `window.__app`), `resetApp()`, `window`, `document`.
 - `beforeEach`/`afterEach` на верхнем уровне — глобальные (для всех тестов), внутри `describe` — локальные. В тестах зарегистрирован `beforeEach(resetApp)`.
 - `resetApp()` чистит `localStorage`, `memStore` (`storageClearMemory`), убирает `indexedDB`, обнуляет данные и вызывает `resetNavigation()` — сбрасывает путь, поиск, `viewingId`/`selectedId` и состояние редактора, поэтому тесты не влияют друг на друга.
 - **Подводный камень:** `applyData(data)` только **возвращает** заметки и не присваивает `state.notes`. Нужно `state.notes = applyData(...)`.

@@ -2,7 +2,7 @@
 'use strict';
 
 /*
- * Мини-раннер тестов для note-tree.html.
+ * Мини-раннер тестов для tag-tree.html.
  *
  * Загружает приложение в jsdom (инлайновый <script> выполняется целиком),
  * выставляет глобальные window/document/app и простой набор describe/test,
@@ -21,7 +21,7 @@ const root = path.resolve(testsDir, '..');
 // jsdom установлен локально в tests/node_modules (см. tests/package.json).
 const { JSDOM } = require(path.join(testsDir, 'node_modules', 'jsdom'));
 
-const html = fs.readFileSync(path.join(root, 'note-tree.html'), 'utf8');
+const html = fs.readFileSync(path.join(root, 'tag-tree.html'), 'utf8');
 const dom = new JSDOM(html, {
   url: 'http://localhost/',
   runScripts: 'dangerously', // выполняем инлайновый <script> приложения
@@ -53,7 +53,7 @@ global.requestAnimationFrame = window.requestAnimationFrame
 // Приложение инициализируется синхронно при парсинге HTML, поэтому хук уже готов.
 const app = window.__app;
 if (!app) {
-  console.error('Не найден window.__app — инициализация note-tree.html не удалась.');
+  console.error('Не найден window.__app — инициализация tag-tree.html не удалась.');
   process.exit(1);
 }
 
