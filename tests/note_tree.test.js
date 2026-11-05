@@ -61,6 +61,22 @@ describe('Дерево тэгов', () => {
     strictEqual(app.tagsOf(n).length, 6);
     strictEqual(app.pathTagsOf(n).length, 5);
   });
+
+  test('группировка заметок с одинаковым набором тэгов не теряет пути', () => {
+    const tagList = ['a', 'b', 'c', 'd', 'e'].map((name, i) => ({ id: 't' + i, name }));
+    const notes = Array.from({ length: 30 }, (_, i) => ({
+      id: 'n' + i, title: 'x', tagIds: tagList.map(t => t.id)
+    }));
+    seed(tagList, notes);
+    const root = app.buildTree();
+    strictEqual(root.children.get('a').ids.size, 30, 'первый уровень содержит все заметки');
+    const leaf = root.children.get('a').children.get('b').children.get('c')
+      .children.get('d').children.get('e');
+    strictEqual(leaf.ids.size, 30, 'полная перестановка содержит все заметки');
+    strictEqual(app.notesForPath(['a', 'b', 'c', 'd', 'e']).length, 30);
+    const reversed = app.notesForPath(['e', 'd', 'c', 'b', 'a']);
+    strictEqual(new Set(reversed.map(n => n.id)).size, 30, 'обратная перестановка без дублей');
+  });
 });
 
 describe('Нормализация и импорт', () => {
@@ -2403,6 +2419,18 @@ describe('Надёжность данных: конфликты вкладок �
     app.openDraft('n1');
     strictEqual(app.editingId, null, 'открывается как новая заметка');
     strictEqual(document.getElementById('fTitle').value, 'Спасти текст');
+  });
+});
+
+describe('Кэши рендера', () => {
+  test('превью карточки обновляется после изменения текста', () => {
+    seed([], [{ id: 'n1', title: 'Заметка', body: 'старый текст', tagIds: [], updated: 1 }]);
+    app.renderAll();
+    strictEqual(document.querySelector('#notes .preview').textContent, 'старый текст');
+    app.openEditor('n1');
+    document.getElementById('fBody').value = 'новый текст';
+    app.saveNote();
+    strictEqual(document.querySelector('#notes .preview').textContent, 'новый текст');
   });
 });
 

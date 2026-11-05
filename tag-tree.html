@@ -2178,11 +2178,12 @@ function invalidateTree() {
   searchTextCache = new Map();
   backlinkIndexCache = null;
   noteIndexCache = { ref: null, length: -1, map: null };
+  previewTextCache = new Map();
   treeDirty = true;
 }
 // Точечно сбросить кэши текста/ссылок заметки, не перестраивая дерево.
 function invalidateNoteCaches(n) {
-  if (n) searchTextCache.delete(n.id);
+  if (n) { searchTextCache.delete(n.id); previewTextCache.delete(n.id); }
   backlinkIndexCache = null;
 }
 // Имена тэгов заметки в нижнем регистре. Кэш сбрасывается в invalidateTree().
@@ -2194,16 +2195,40 @@ function tagsLowerOf(n) {
 function buildTree() {
   if (treeCache) return treeCache;
   const root = { name: null, ids: new Set(), children: new Map() };
+  // Группируем заметки по набору участвующих тэгов: у заметок с одинаковым
+  // набором (частый случай после массовых операций) перестановки общие.
+  const groups = new Map();
   state.notes.forEach(note => {
     const t = pathTagsOf(note);
     if (t.length === 0) { root.ids.add(note.id); return; }
-    notePaths(note).forEach(p => {
+    const key = t.slice().sort().join('\u0001');
+    let g = groups.get(key);
+    if (!g) { g = { tags: t, ids: [], paths: null }; groups.set(key, g); }
+    g.ids.push(note.id);
+  });
+  groups.forEach(g => {
+    const key = g.tags.slice().sort().join('\u0001');
+    let paths = permCache.get(key);
+    if (!paths) { paths = permute(g.tags); permCache.set(key, paths); }
+    // Для каждой уникальной ветки-префикса id добавляются один раз, а не на
+    // каждом полном пути: 5 тэгов дают 325 префиксов вместо 600 шагов путей.
+    const prefixes = new Map();
+    paths.forEach(p => {
+      for (let d = 1; d <= p.length; d++) {
+        const pre = p.slice(0, d);
+        const pk = pre.join('\u0001');
+        if (!prefixes.has(pk)) prefixes.set(pk, pre);
+      }
+    });
+    prefixes.forEach(pre => {
       let node = root;
-      p.forEach(tag => {
-        if (!node.children.has(tag)) node.children.set(tag, { name: tag, ids: new Set(), children: new Map() });
-        node = node.children.get(tag);
-        node.ids.add(note.id);
-      });
+      for (let d = 0; d < pre.length; d++) {
+        const tag = pre[d];
+        let next = node.children.get(tag);
+        if (!next) { next = { name: tag, ids: new Set(), children: new Map() }; node.children.set(tag, next); }
+        node = next;
+      }
+      for (let i = 0; i < g.ids.length; i++) node.ids.add(g.ids[i]);
     });
   });
   treeCache = root;
@@ -3178,12 +3203,24 @@ function safeCssColor(c) {
 // Короткое превью для карточки: таблицы выкидываем (в 96px они нечитаемы),
 // лишние пустые строки схлопываем, длину ограничиваем. В результатах поиска
 // сдвигаем окно к первому совпадению, чтобы найденное не осталось за кадром.
-function previewText(body, query) {
-  const cleaned = (body || '')
-    .split('\n')
-    .filter(line => !/^\s*\|.*\|\s*$/.test(line))
-    .join('\n')
-    .replace(/\n{3,}/g, '\n\n');
+// Очищенный текст превью по id заметки (см. previewText).
+let previewTextCache = new Map();
+function previewText(n, query) {
+  // Чистый текст (без строк таблиц) зависит только от тела заметки, а не от
+  // поискового запроса. Кэшируем его по id/телу: длинные заметки не приходится
+  // заново разбирать по строкам при каждом рендере списка.
+  const body = n.body || '';
+  let rec = previewTextCache.get(n.id);
+  if (!rec || rec.body !== body) {
+    const cleaned = body
+      .split('\n')
+      .filter(line => !/^\s*\|.*\|\s*$/.test(line))
+      .join('\n')
+      .replace(/\n{3,}/g, '\n\n');
+    rec = { body, text: cleaned };
+    previewTextCache.set(n.id, rec);
+  }
+  const cleaned = rec.text;
   const limit = 140;
   if (query) {
     const lower = cleaned.toLowerCase();
@@ -3416,15 +3453,16 @@ function loadMoreNotes() {
 // escapeHtml/renderMarkdown. Вынесено отдельно, чтобы догрузка не пересобирала
 // уже показанные карточки.
 function noteCardHtml(n) {
-  const preview = previewText(n.body, searchQuery);
+  const preview = previewText(n, searchQuery);
   const dt = humanDate(n.updated || n.created);
-  const pathTags = pathTagsOf(n);
+  const tagList = tagsOf(n);
+  const pathTags = tagList.slice(0, MAX_PERM_TAGS);
   const pathText = pathTags.length ? pathTags.join(' / ') : 'Без тэга';
   const pathHtml = searchQuery
     ? `<div class="note-path"><span class="np-text" title="${escapeHtml(pathText)}">${escapeHtml(pathText)}</span>`
       + `<button type="button" class="np-show" data-path="${escapeHtml(JSON.stringify(pathTags))}" title="Показать в дереве">в дереве</button></div>`
     : '';
-  const tagsHtml = tagsOf(n).map(t => {
+  const tagsHtml = tagList.map(t => {
     const c = safeCssColor(tagColor(t));
     const style = c ? ` style="background:${c};color:#fff"` : '';
     const title = escapeHtml('Открыть папку тэга «' + t + '»');
