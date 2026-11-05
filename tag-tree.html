@@ -242,6 +242,9 @@
   .stars .star { color: var(--muted); opacity: .5; }
   .stars .star.on { color: #f5a524; opacity: 1; }
   .note-card .stars { font-size: 13px; }
+  /* Звёзды карточки кликабельны: оценка ставится прямо в списке */
+  .note-card .stars.rate .star.hit { cursor: pointer; transition: transform .1s, color .12s, opacity .12s; }
+  .note-card .stars.rate .star.hit:hover { color: #f5a524; opacity: 1; transform: scale(1.18); }
   .note-view .nv-meta > .nv-rating { display: inline-flex; align-items: center; gap: 6px; }
   .note-view .nv-rating .stars { font-size: 13px; }
   .rating-input { display: inline-flex; align-items: center; gap: 2px; }
@@ -472,6 +475,10 @@
     .note-editor .md-body, .note-editor .md-body textarea, .note-editor .md-body #mdPreview { min-height: 240px; }
     .tm-color { width: 32px; height: 32px; }
     .md-tb { min-height: 36px; min-width: 36px; padding: 6px 9px; }
+    /* Звёзды редактора — полноценные тач-цели 40×40 */
+    .rating-input .star-btn { min-width: 40px; min-height: 40px; padding: 0; }
+    /* Кликабельные звёзды карточки: увеличиваем площадь попадания */
+    .note-card .stars.rate .star.hit { padding: 6px 3px; margin: -6px -3px; }
     /* Тулбар Markdown — одна прокручиваемая строка: экономит высоту на телефоне. */
     .md-toolbar { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }
     .md-toolbar .md-tb, .md-toolbar .md-sep { flex: 0 0 auto; }
@@ -510,6 +517,7 @@
     #printArea .print-note { page-break-inside: avoid; margin-bottom: 22px; }
     #printArea .print-note h2 { margin: 0 0 4px; font-size: 18px; }
     #printArea .print-tags { font-size: 12px; color: #555; margin-bottom: 8px; }
+    #printArea .print-rating { font-size: 13px; color: #b7791f; margin-bottom: 8px; letter-spacing: 1px; }
     #printArea .print-body { white-space: pre-wrap; line-height: 1.5; }
     #printArea a { color: #000; text-decoration: none; }
   }
@@ -760,6 +768,7 @@ const JSON_MIME = 'application/json;charset=utf-8';
 const SORT_MODES = [
   { id: 'updated', label: 'Сначала обновлённые' },
   { id: 'created', label: 'Сначала новые' },
+  { id: 'rating', label: 'По оценке' },
   { id: 'title', label: 'По алфавиту' }
 ];
 
@@ -1152,13 +1161,26 @@ function clampRating(value) {
   return Number.isFinite(n) ? Math.max(0, Math.min(5, n)) : 0;
 }
 // Звёзды рейтинга: закрашенные ★ и пустые ☆ (без пользовательских данных).
-function starsHtml(rating) {
+// interactive — звёзды карточки: по ним можно ставить оценку кликом.
+function starsHtml(rating, interactive) {
   const r = clampRating(rating);
   let stars = '';
   for (let i = 1; i <= 5; i++) {
-    stars += `<span class="star${i <= r ? ' on' : ''}">${i <= r ? '★' : '☆'}</span>`;
+    const cls = 'star' + (i <= r ? ' on' : '') + (interactive ? ' hit' : '');
+    const data = interactive ? ` data-rating="${i}"` : '';
+    stars += `<span class="${cls}"${data}>${i <= r ? '★' : '☆'}</span>`;
+  }
+  if (interactive) {
+    const hint = r ? 'Рейтинг: ' + r + ' из 5. Нажмите звезду, чтобы изменить, или ту же — чтобы сбросить' : 'Поставить оценку';
+    return `<span class="stars rate" role="img" aria-label="Рейтинг: ${r} из 5" title="${hint}" draggable="false">${stars}</span>`;
   }
   return `<span class="stars" role="img" aria-label="Рейтинг: ${r} из 5" title="Рейтинг: ${r} из 5">${stars}</span>`;
+}
+// Строка оценки для экспорта/печати; пустая, если заметка не оценена.
+function ratingText(rating) {
+  const r = clampRating(rating);
+  if (!r) return '';
+  return '★'.repeat(r) + '☆'.repeat(5 - r);
 }
 // Привести заметку к единой структуре. Поле tagIds — массив id тэгов.
 // Поддерживается старый формат (tags — строковые имена): конвертируется в id.
@@ -1357,6 +1379,14 @@ function maybeSnapshot(force) {
   };
   list.unshift(snapshot);
   saveSnapshots(list);
+  return true;
+}
+// Ручной снимок из меню «Версии данных»: фиксирует состояние, даже если
+// состав заметок не менялся (maybeSnapshot сам по себе этого не делает).
+function makeSnapshotNow() {
+  if (state.notes.length === 0) { notify('⚠️ Нечего сохранять: заметок нет'); return false; }
+  maybeSnapshot(true);
+  notify('📸 Снимок создан');
   return true;
 }
 // Восстановить состояние из снимка по индексу.
@@ -1758,6 +1788,7 @@ function paletteCommands() {
     { label: '🖨️ Печать/PDF всех заметок', hint: '', run: () => printNotes(state.notes) },
     { label: '🌓 Сменить тему', hint: '', run: () => toggleTheme() },
     { label: '🕘 Версии данных', hint: '', run: () => snapshotMenu() },
+    { label: '📸 Сделать снимок сейчас', hint: '', run: () => makeSnapshotNow() },
     { label: '🗑 Корзина заметок', hint: '', run: () => trashMenu() },
     { label: '↩ Отменить последнее действие', hint: 'Ctrl+Z', run: () => undoLastAction() },
     { label: 'ℹ️ Диагностика хранилища', hint: '', run: () => showDiagnostics() },
@@ -2262,6 +2293,7 @@ function sortNotes(notes, mode) {
   const copy = notes.slice();
   if (m === 'title') copy.sort((a, b) => (a.title || '').localeCompare(b.title || '', LOCALE));
   else if (m === 'created') copy.sort((a, b) => (b.created || 0) - (a.created || 0));
+  else if (m === 'rating') copy.sort((a, b) => clampRating(b.rating) - clampRating(a.rating) || (b.updated || 0) - (a.updated || 0));
   else copy.sort((a, b) => (b.updated || 0) - (a.updated || 0));
   return copy;
 }
@@ -2400,7 +2432,7 @@ function renderNotes() {
       return `<span class="tag clk" data-tag="${escapeHtml(t)}" title="${title}"${style}>${escapeHtml(t)}</span>`;
     }).join('');
     const cls = 'note-card' + (n.pinned ? ' pinned' : '') + (selectedId === n.id ? ' selected' : '');
-    const stars = clampRating(n.rating) ? starsHtml(n.rating) : '';
+    const stars = starsHtml(n.rating, true);
     return `<div class="${cls}" data-note-id="${escapeHtml(n.id)}" tabindex="0" draggable="true">`
       + `<h3>${escapeHtml((n.pinned ? '📌 ' : '') + (n.title || UNTITLED))}</h3>`
       + `<div class="preview">${renderMarkdown(preview)}</div>`
@@ -3809,6 +3841,7 @@ async function snapshotMenu() {
     });
   }
   items.push('-');
+  items.push({ label: '📸 Сделать снимок сейчас', run: () => makeSnapshotNow() });
   items.push({ label: '🗑 Корзина (' + loadTrash().length + ')', run: () => trashMenu() });
   items.push({ label: '♻️ Резервная копия (файл/браузер)', run: () => restoreFromBackup() });
   const btn = document.getElementById('backupBtn');
@@ -4213,21 +4246,33 @@ async function menuRenameTag(oldName) {
 function menuDeleteTag(name) { deleteTag(name); }
 // Пусто ли переданное множество заметок (общая проверка для экспорта/печати).
 function isEmptyList(notes) { return !notes || notes.length === 0; }
+// Текст экспорта в Markdown — чистая функция (тестируется без скачивания).
+function exportMdText(notes) {
+  const lines = notes.map(n => {
+    const tags = tagsOf(n).map(t => '#' + t).join(' ');
+    const rating = ratingText(n.rating);
+    const ratingLine = rating ? 'Оценка: ' + rating + '\n' : '';
+    return '# ' + (n.title || UNTITLED) + '\n' + tags + '\n' + ratingLine + '\n' + (n.body || '') + '\n\n';
+  });
+  return '# TagTree\n\n' + lines.join('\n');
+}
+// Текст экспорта в TXT — чистая функция.
+function exportTxtText(notes) {
+  const lines = notes.map(n => {
+    const rating = ratingText(n.rating);
+    const ratingLine = rating ? 'Оценка: ' + rating + '\n' : '';
+    return (n.title || UNTITLED) + '\n' + 'Тэги: ' + tagsOf(n).join(', ') + '\n' + ratingLine + '\n' + (n.body || '') + '\n' + '—'.repeat(30);
+  });
+  return lines.join('\n');
+}
 // Экспорт подпапки/папки в Markdown (все заметки в ней).
 function exportMd(notes) {
   if (isEmptyList(notes)) { notify(NO_NOTES_MSG); return; }
-  const lines = notes.map(n => {
-    const tags = tagsOf(n).map(t => '#' + t).join(' ');
-    return '# ' + (n.title || UNTITLED) + '\n' + tags + '\n\n' + (n.body || '') + '\n\n';
-  });
-  downloadText('# TagTree\n\n' + lines.join('\n'), 'заметки.md');
+  downloadText(exportMdText(notes), 'заметки.md');
 }
 function exportTxt(notes) {
   if (isEmptyList(notes)) { notify(NO_NOTES_MSG); return; }
-  const lines = notes.map(n => {
-    return (n.title || UNTITLED) + '\n' + 'Тэги: ' + tagsOf(n).join(', ') + '\n\n' + (n.body || '') + '\n' + '—'.repeat(30);
-  });
-  downloadText(lines.join('\n'), 'заметки.txt');
+  downloadText(exportTxtText(notes), 'заметки.txt');
 }
 // Печать/PDF набора заметок: заполняем #printArea, печатаем, затем очищаем.
 // Пользователь сохраняет как PDF через диалог печати браузера (без внешних библиотек).
@@ -4246,7 +4291,15 @@ function printNotes(notes) {
     const body = document.createElement('div');
     body.className = 'print-body';
     body.textContent = n.body || '';
-    wrap.appendChild(h); wrap.appendChild(tags); wrap.appendChild(body);
+    wrap.appendChild(h); wrap.appendChild(tags);
+    const rating = ratingText(n.rating);
+    if (rating) {
+      const stars = document.createElement('div');
+      stars.className = 'print-rating';
+      stars.textContent = 'Оценка: ' + rating;
+      wrap.appendChild(stars);
+    }
+    wrap.appendChild(body);
     area.appendChild(wrap);
   });
   const clear = () => { area.innerHTML = ''; };
@@ -4364,6 +4417,37 @@ function togglePin(noteId) {
   saveToFile();
   renderAll({ tree: false }); // закрепление не меняет состав дерева
   notify(n.pinned ? '📌 Заметка закреплена' : '📌 Заметка откреплена');
+}
+// Оценка прямо с карточки: повторный клик по той же звезде сбрасывает её.
+// Список не пересобираем (сохраняем прокрутку), кроме сортировки по оценке.
+function rateNoteFromCard(noteId, value) {
+  const n = noteById(noteId);
+  if (!n) return;
+  const v = clampRating(value);
+  const next = clampRating(n.rating) === v ? 0 : v;
+  n.rating = next;
+  // Если эта же заметка открыта в редакторе — синхронизируем, чтобы
+  // сохранение не вернуло старую оценку.
+  if (editorOpen && editingId === n.id) {
+    editorRating = next;
+    renderRatingInput();
+    updateEditorDirtyMark();
+  }
+  saveState();
+  saveToFile();
+  if (sortMode === 'rating') {
+    renderNotes();
+  } else {
+    const card = findNoteCard(n.id);
+    const box = card && card.querySelector('.stars');
+    if (box) {
+      const tmp = document.createElement('div');
+      tmp.innerHTML = starsHtml(next, true);
+      box.replaceWith(tmp.firstChild);
+    }
+  }
+  if (viewingId === n.id) renderNoteView();
+  notify(next ? '★ Оценка: ' + next + ' из 5' : '☆ Оценка сброшена');
 }
 // Подменю истории версий заметки (до 10 последних снимков).
 function historyMenuFor(noteId) {
@@ -4697,6 +4781,17 @@ function attachNotesEvents($) {
   $('notes').addEventListener('keydown', notesKeyNav);
   // Делегирование событий карточек: один обработчик вместо тысяч замыканий.
   $('notes').addEventListener('click', (e) => {
+    // Звезда на карточке ставит оценку и не открывает просмотр заметки.
+    const starEl = e.target.closest('#notes .note-card .stars .star');
+    if (starEl) {
+      const card = starEl.closest('#notes .note-card');
+      if (card) {
+        e.preventDefault();
+        e.stopPropagation();
+        rateNoteFromCard(card.dataset.noteId, Number(starEl.dataset.rating));
+      }
+      return;
+    }
     const pathBtn = e.target.closest('#notes .note-path .np-show');
     if (pathBtn) {
       e.preventDefault();
@@ -4724,7 +4819,7 @@ function attachNotesEvents($) {
   });
   // Двойной клик по карточке — сразу в редактор (одиночный открывает просмотр).
   $('notes').addEventListener('dblclick', (e) => {
-    if (e.target.closest('.tag') || e.target.closest('.np-show')) return; // не редактор
+    if (e.target.closest('.tag') || e.target.closest('.np-show') || e.target.closest('.stars')) return; // не редактор
     const card = e.target.closest('#notes .note-card');
     if (card) openEditor(card.dataset.noteId);
   });
@@ -4745,6 +4840,7 @@ function attachNotesEvents($) {
     noteContextMenu(e.clientX, e.clientY, card.dataset.noteId);
   });
   $('notes').addEventListener('dragstart', (e) => {
+    if (e.target.closest('.stars')) { e.preventDefault(); return; }
     const card = e.target.closest('#notes .note-card');
     if (!card) return;
     e.dataTransfer.setData(DND_MIME, card.dataset.noteId);
@@ -4791,8 +4887,8 @@ function attachSearchEvents($) {
       return;
     }
     if (items.length === 0) return;
-    // Поле поиска не прокручиваем: подсказки и так видны под ним.
-    if (moveActiveItem(items, e, { scroll: false })) return;
+    // Список подсказок ограничен по высоте и прокручивается к активному пункту.
+    if (moveActiveItem(items, e)) return;
     if (e.key === 'Enter') {
       const idx = items.findIndex(el => el.classList.contains('active'));
       if (idx >= 0) { e.preventDefault(); items[idx].click(); }
@@ -4927,11 +5023,10 @@ if (window) {
     state, tagsOf, pathTagsOf, noteBelongsToPath, buildTree,
     applyData, ensureTag, tagName, pruneTagIds, renameTag, deleteTag, invalidateTree,
     isValidData, normalizeNote, renderMarkdown, highlightElement, parseLocalDate, byteLength,
-    clampRating, starsHtml,
+    clampRating, starsHtml, ratingText,
     renderAll, renderNotes, renderBreadcrumbs, notesInPath, onSearch, resetNavigation, closeEditor,
     sortNotes, tagCount, tagColor, setTagColor, moveNoteToTag, pushHistory, restoreHistory,
-    setSortMode, sortMenu, printNotes, parseQuery, tokenizeQuery, tagToken, matchesSearch, matchesSearchScoped, fuzzyMatch,
-    setSearchScope, searchScopeNotes, renderSearchScope, clearSearchField, goToPathRevealed, revealTreePath, paletteScore,
+    setSortMode, sortMenu, printNotes, parseQuery, tokenizeQuery, tagToken, matchesSearch, matchesSearchScoped, fuzzyMatch,    setSearchScope, searchScopeNotes, renderSearchScope, clearSearchField, goToPathRevealed, revealTreePath, paletteScore,
     setMdMode, applyMdFormat, updateMdPreview, updateMdWordCount, mdMode,
     updateSearchSuggest, applySearchSuggest, getParsedQuery, tagCounts, notesInFolder, submenuFor,
     closeSidebar, toggleSidebar, storageProbe, showDiagnostics, restoreFromBackup,
@@ -4947,7 +5042,7 @@ if (window) {
     loadTrash, saveTrash, moveToTrash, restoreFromTrash, emptyTrash, trashMenu,
     prepareUndo, undoLastAction,
     openFindBar, closeFindBar, mdFindNext, mdReplaceOne, mdReplaceAll, updateMdToc,
-    humanDate, duplicateNote, exportFound, saveLastView, restoreLastView,
+    humanDate, duplicateNote, exportFound, exportMdText, exportTxtText, rateNoteFromCard, makeSnapshotNow, saveLastView, restoreLastView,
     openEditor, saveNote, deleteNote,
     openNoteView, closeNoteView, renderNoteView, goToPath,
     tagsLowerOf, applyTreeState, safeCssColor, scheduleMdPreview, cancelMdPreview,

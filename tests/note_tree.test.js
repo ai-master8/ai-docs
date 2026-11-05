@@ -620,10 +620,118 @@ describe('Тэги новой заметки и рейтинг', () => {
     strictEqual(copy.rating, 4);
   });
 
-  test('без оценки звёзды в карточке не показываются', () => {
+  test('без оценки звёзды в карточке пустые, но кликабельные', () => {
     seed([], [{ id: 'n1', title: 'Заметка', tagIds: [] }]);
     app.renderAll();
-    strictEqual(document.querySelectorAll('#notes .note-card .stars').length, 0);
+    const stars = document.querySelectorAll('#notes .note-card .stars .star');
+    strictEqual(stars.length, 5);
+    strictEqual(document.querySelectorAll('#notes .note-card .stars .star.on').length, 0);
+    strictEqual(document.querySelectorAll('#notes .note-card .stars .star.hit').length, 5);
+  });
+
+  test('клик по звезде карточки ставит оценку, не открывая просмотр и редактор', () => {
+    seed([], [{ id: 'n1', title: 'Заметка', tagIds: [] }]);
+    app.renderAll();
+    const card = document.querySelector('#notes .note-card');
+    const stars = card.querySelectorAll('.stars .star');
+    stars[3].click(); // четвёртая звезда
+    strictEqual(app.state.notes[0].rating, 4);
+    strictEqual(document.querySelectorAll('#notes .note-card .stars .star.on').length, 4);
+    strictEqual(app.viewingId, null, 'просмотр не открылся');
+    strictEqual(app.editorOpen, false, 'редактор не открылся');
+    ok(document.contains(card), 'карточка не пересоздана — прокрутка сохранена');
+  });
+
+  test('повторный клик по звезде карточки сбрасывает оценку', () => {
+    seed([], [{ id: 'n1', title: 'Заметка', tagIds: [], rating: 3 }]);
+    app.renderAll();
+    document.querySelectorAll('#notes .note-card .stars .star')[2].click();
+    strictEqual(app.state.notes[0].rating, 0);
+    strictEqual(document.querySelectorAll('#notes .note-card .stars .star.on').length, 0);
+  });
+
+  test('двойной клик по звезде карточки не открывает редактор', () => {
+    seed([], [{ id: 'n1', title: 'Заметка', tagIds: [] }]);
+    app.renderAll();
+    const star = document.querySelector('#notes .note-card .stars .star');
+    star.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+    strictEqual(app.editorOpen, false);
+  });
+
+  test('оценка с карточки синхронизируется с открытым редактором', () => {
+    seed([], [{ id: 'n1', title: 'Заметка', tagIds: [] }]);
+    app.renderAll();
+    app.openEditor('n1');
+    document.querySelectorAll('#notes .note-card .stars .star')[4].click();
+    strictEqual(app.editorRating, 5, 'редактор видит новую оценку');
+    app.saveNote();
+    strictEqual(app.state.notes[0].rating, 5, 'сохранение не вернуло старую оценку');
+  });
+
+  test('при сортировке по оценке карточки перестраиваются сразу', () => {
+    seed([], [
+      { id: 'n1', title: 'A', tagIds: [] },
+      { id: 'n2', title: 'B', tagIds: [] }
+    ]);
+    app.setSortMode('rating');
+    app.renderAll();
+    strictEqual(document.querySelector('#notes .note-card').dataset.noteId, 'n1');
+    // Оцениваем вторую карточку — она должна подняться наверх.
+    const cards = document.querySelectorAll('#notes .note-card');
+    cards[1].querySelectorAll('.stars .star')[4].click();
+    strictEqual(document.querySelector('#notes .note-card').dataset.noteId, 'n2');
+  });
+});
+
+describe('Сортировка, экспорт и снимки', () => {
+  test('сортировка по оценке: высокие выше, без оценки — в конце', () => {
+    const notes = [
+      { id: 'a', title: 'A', rating: 0, updated: 100 },
+      { id: 'b', title: 'B', rating: 5, updated: 50 },
+      { id: 'c', title: 'C', rating: 3, updated: 10 },
+      { id: 'd', title: 'D', rating: 3, updated: 90 }
+    ];
+    deepEqual(app.sortNotes(notes, 'rating').map(n => n.id), ['b', 'd', 'c', 'a']);
+  });
+
+  test('экспорт Markdown и TXT включают оценку только у оценённых заметок', () => {
+    seed([{ id: 't1', name: 'работа' }], [
+      { id: 'n1', title: 'С оценкой', body: 'текст', tagIds: ['t1'], rating: 4 },
+      { id: 'n2', title: 'Без оценки', body: 'текст', tagIds: [] }
+    ]);
+    const md = app.exportMdText(app.state.notes);
+    ok(md.includes('Оценка: ★★★★☆'), 'Markdown содержит звёзды');
+    strictEqual(md.split('Оценка:').length - 1, 1, 'у неоценённой строки нет');
+    const txt = app.exportTxtText(app.state.notes);
+    ok(txt.includes('Оценка: ★★★★☆'), 'TXT содержит звёзды');
+    strictEqual(txt.split('Оценка:').length - 1, 1);
+  });
+
+  test('печать добавляет строку оценки только для оценённых', () => {
+    seed([], [
+      { id: 'n1', title: 'С оценкой', tagIds: [], rating: 2 },
+      { id: 'n2', title: 'Без оценки', tagIds: [] }
+    ]);
+    const orig = window.print;
+    window.print = () => {};
+    try { app.printNotes(app.state.notes); } finally { window.print = orig; }
+    const rows = [...document.querySelectorAll('#printArea .print-rating')].map(e => e.textContent);
+    deepEqual(rows, ['Оценка: ★★☆☆☆']);
+  });
+
+  test('ручной снимок создаётся, даже если состав заметок не менялся', () => {
+    seed([], [{ id: 'n1', title: 'Заметка', tagIds: [] }]);
+    app.saveSnapshots([]);
+    strictEqual(app.makeSnapshotNow(), true);
+    strictEqual(app.loadSnapshots().length, 1);
+    strictEqual(app.makeSnapshotNow(), true);
+    strictEqual(app.loadSnapshots().length, 2, 'второй снимок тоже создан');
+  });
+
+  test('ручной снимок не создаётся на пустом архиве', () => {
+    app.saveSnapshots([]);
+    strictEqual(app.makeSnapshotNow(), false);
+    strictEqual(app.loadSnapshots().length, 0);
   });
 });
 
