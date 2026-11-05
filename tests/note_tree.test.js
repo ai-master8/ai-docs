@@ -2434,3 +2434,96 @@ describe('Кэши рендера', () => {
   });
 });
 
+describe('UX редактора и представлений', () => {
+  test('Enter продолжает маркированный, нумерованный и задачный список', () => {
+    const ta = document.getElementById('fBody');
+    ta.value = '- пункт';
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+    strictEqual(app.continueMarkdownList(ta), true);
+    strictEqual(ta.value, '- пункт\n- ');
+    ta.value = '1. первый';
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+    app.continueMarkdownList(ta);
+    strictEqual(ta.value, '1. первый\n2. ');
+    ta.value = '- [x] готово';
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+    app.continueMarkdownList(ta);
+    strictEqual(ta.value, '- [x] готово\n- [ ] ');
+  });
+
+  test('Enter на пустом пункте убирает маркер', () => {
+    const ta = document.getElementById('fBody');
+    ta.value = '- ';
+    ta.setSelectionRange(2, 2);
+    strictEqual(app.continueMarkdownList(ta), true);
+    strictEqual(ta.value, '');
+  });
+
+  test('Tab и Shift+Tab меняют отступ строк', () => {
+    const ta = document.getElementById('fBody');
+    ta.value = 'строка';
+    ta.setSelectionRange(0, 0);
+    app.indentMarkdown(ta, false);
+    strictEqual(ta.value, '  строка');
+    app.indentMarkdown(ta, true);
+    strictEqual(ta.value, 'строка');
+  });
+
+  test('Ctrl+B оборачивает выделение в редакторе', () => {
+    seed([], [{ id: 'n1', title: 'Заметка', body: 'текст', tagIds: [], updated: 1 }]);
+    app.openEditor('n1');
+    const ta = document.getElementById('fBody');
+    ta.value = 'текст';
+    ta.setSelectionRange(0, 5);
+    ta.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'b', ctrlKey: true, bubbles: true, cancelable: true }));
+    strictEqual(ta.value, '**текст**');
+  });
+
+  test('быстрые фильтры pinned/task/links добавляют точный токен', () => {
+    seed([], [
+      { id: 'n1', title: 'Закреплена', body: '', tagIds: [], pinned: true },
+      { id: 'n2', title: 'Задача', body: '- [ ] сделать', tagIds: [] },
+      { id: 'n3', title: 'Ссылка', body: 'см. [[n1]]', tagIds: [] }
+    ]);
+    app.toggleExactFacet('pinned:true');
+    strictEqual(app.getParsedQuery().pinned, true);
+    deepEqual(app.searchScopeNotes().map(n => n.id), ['n1']);
+    app.toggleExactFacet('pinned:true');
+    strictEqual(app.searchQuery, '', 'повторное нажатие снимает фильтр');
+  });
+
+  test('joinQueryTokens заново экранирует тэги с пробелами', () => {
+    strictEqual(app.joinQueryTokens(['#мое дело', 'обычный']), '#"мое дело" обычный');
+  });
+
+  test('представление можно обновить и переименовать', async () => {
+    seed([], [{ id: 'n1', title: 'Заметка', body: '', tagIds: [] }]);
+    app.onSearch('заметка');
+    app.addView('Мой фильтр', 'заметка', 'updated', 'all');
+    app.onSearch('другое');
+    strictEqual(app.updateView('Мой фильтр'), true);
+    strictEqual(app.loadViews()[0].query, 'другое');
+
+    const p = app.renameView('Мой фильтр');
+    document.getElementById('dialogInput').value = 'Новый фильтр';
+    document.getElementById('dialogOkBtn').click();
+    await p;
+    strictEqual(app.loadViews()[0].name, 'Новый фильтр');
+  });
+
+  test('копирование [[ссылки]] и текста заметки', () => {
+    seed([], [{ id: 'n1', title: 'Цель', body: 'тело', tagIds: [] }]);
+    const oldExec = document.execCommand;
+    let copied = '';
+    document.execCommand = () => { copied = document.querySelector('textarea[readonly]').value; return true; };
+    try {
+      strictEqual(app.copyWikiLink('n1'), true);
+      strictEqual(copied, '[[Цель]]');
+      strictEqual(app.copyNoteText('n1'), true);
+      strictEqual(copied, 'Цель\n\nтело');
+    } finally {
+      document.execCommand = oldExec;
+    }
+  });
+});
+
