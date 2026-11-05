@@ -145,6 +145,8 @@
   .view-item .vn { flex: 1; font-weight: 600; }
   .view-item .vq { color: var(--muted); font-size: 11px; }
   .view-item .vx { color: var(--danger); cursor: pointer; padding: 0 4px; }
+  .view-item .vm { color: var(--muted); cursor: pointer; padding: 0 4px; }
+  .view-item .vm:hover { color: var(--text); }
   .tree { flex: 1; overflow: auto; padding: 8px; }
   .node-row {
     display: flex; align-items: center; gap: 6px; padding: 6px 8px; border-radius: 8px;
@@ -4803,6 +4805,65 @@ function applyMdFormat(cmd) {
   ta.setSelectionRange(cursor, cursor);
   ta.dispatchEvent(new Event('input', { bubbles: true }));
 }
+// Продолжение Markdown-списка по Enter: маркер (и чекбокс) переносится на
+// новую строку; пустой пункт удаляет маркер и выходит из списка.
+function listPrefixAt(line) {
+  const m = /^(\s*)([-*+]|\d+\.)\s+(\[[ xX]\]\s+)?(.*)$/.exec(line);
+  if (!m) return null;
+  return { indent: m[1], marker: m[2], task: m[3] || '', text: m[4] || '' };
+}
+function continueMarkdownList(ta) {
+  if (!ta || ta.selectionStart !== ta.selectionEnd) return false;
+  const value = ta.value;
+  const pos = ta.selectionStart;
+  const lineStart = value.lastIndexOf('\n', pos - 1) + 1;
+  const nextNl = value.indexOf('\n', pos);
+  const lineEnd = nextNl === -1 ? value.length : nextNl;
+  if (pos !== lineEnd) return false; // Enter в середине строки — обычный перенос
+  const p = listPrefixAt(value.slice(lineStart, lineEnd));
+  if (!p) return false;
+  if (!p.text.trim()) { // пустой пункт: убираем маркер, оставляя отступ
+    ta.setRangeText('', lineStart + p.indent.length, lineEnd, 'end');
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  }
+  let marker = p.marker;
+  if (/^\d+\.$/.test(marker)) marker = (parseInt(marker, 10) + 1) + '.';
+  const insert = '\n' + p.indent + marker + ' ' + (p.task ? '[ ] ' : '');
+  ta.setRangeText(insert, pos, pos, 'end');
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
+  return true;
+}
+// Tab / Shift+Tab в теле: отступ на два пробела (для выделения — по строкам).
+function indentMarkdown(ta, outdent) {
+  const start = ta.selectionStart, end = ta.selectionEnd, value = ta.value;
+  if (start === end) {
+    const lineStart = value.lastIndexOf('\n', start - 1) + 1;
+    if (outdent) {
+      const before = value.slice(lineStart, start);
+      const spaces = (before.match(/^ +/) || [''])[0].length;
+      const n = before.startsWith('\t') ? 1 : Math.min(2, spaces);
+      if (!n) return false;
+      ta.setRangeText('', start - n, start, 'end');
+    } else {
+      ta.setRangeText('  ', start, end, 'end');
+    }
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  }
+  const from = value.lastIndexOf('\n', start - 1) + 1;
+  let to = value.indexOf('\n', end - 1);
+  if (to === -1) to = value.length;
+  const block = value.slice(from, to);
+  const next = block.split('\n')
+    .map(l => outdent ? l.replace(/^( {1,2}|\t)/, '') : '  ' + l)
+    .join('\n');
+  if (next === block) return false;
+  ta.setRangeText(next, from, to, 'preserve');
+  ta.setSelectionRange(from, Math.max(from, end + next.length - block.length));
+  ta.dispatchEvent(new Event('input', { bubbles: true }));
+  return true;
+}
 
 // ---------- Поиск и замена в редакторе ----------
 function openFindBar() {
@@ -5118,7 +5179,26 @@ function ratingFacetToken() {
 function toggleRatingFacet(token) {
   const toks = tokenizeQuery(searchQuery).filter(t => !/^rating:/i.test(t));
   if (ratingFacetToken() !== token) toks.push(token);
-  const q = toks.join(' ').trim();
+  const q = joinQueryTokens(toks);
+  document.getElementById('search').value = q;
+  onSearch(q);
+}
+// Пересобрать строку запроса из токенов, заново экранируя тэги с пробелами.
+function joinQueryTokens(tokens) {
+  return tokens.map(tok => {
+    const m = /^([#\-!]+)([\s\S]*)$/.exec(tok);
+    return m ? tagToken(m[2], m[1]) : tok;
+  }).join(' ').trim();
+}
+// Универсальный быстрый фильтр: включает/снимает точный токен (pinned:true,
+// task:open, links:orphan), не трогая остальные условия.
+function toggleExactFacet(token) {
+  const low = token.toLowerCase();
+  const toks = tokenizeQuery(searchQuery);
+  const had = toks.some(t => t.toLowerCase() === low);
+  const next = toks.filter(t => t.toLowerCase() !== low);
+  if (!had) next.push(token);
+  const q = joinQueryTokens(next);
   document.getElementById('search').value = q;
   onSearch(q);
 }
@@ -5130,7 +5210,8 @@ function renderFacets() {
   const q = getParsedQuery();
   const inc = new Set(q.includeTags);
   const exc = new Set(q.excludeTags);
-  const activeCount = inc.size + exc.size + q.rating.length + (q.pinned != null ? 1 : 0);
+  const activeCount = inc.size + exc.size + q.rating.length + (q.pinned != null ? 1 : 0)
+    + (q.task ? 1 : 0) + (q.links ? 1 : 0);
   cntEl.textContent = activeCount ? '(' + activeCount + ')' : '';
   if (resetBtn) resetBtn.style.display = activeCount ? 'inline-block' : 'none';
 
@@ -5201,6 +5282,29 @@ function renderFacets() {
     ratingWrap.appendChild(el);
   });
   body.appendChild(ratingWrap);
+  // Быстрые фильтры по флагу, задачам и ссылкам — синтаксис уже поддержан
+  // поиском, но без чипов о нём сложно догадаться.
+  const quickWrap = document.createElement('div');
+  quickWrap.className = 'facets-rating';
+  [
+    { token: 'pinned:true', label: '📌 Закреплённые' },
+    { token: 'task:open', label: '✅ Открытые задачи' },
+    { token: 'links:orphan', label: '🔗 Без ссылок' }
+  ].forEach(chip => {
+    const el = document.createElement('span');
+    const on = tokenizeQuery(searchQuery).some(t => t.toLowerCase() === chip.token);
+    el.className = 'facet rating' + (on ? ' on' : '');
+    el.textContent = chip.label;
+    el.setAttribute('role', 'button');
+    el.tabIndex = 0;
+    el.title = 'Фильтр: ' + chip.label;
+    el.onclick = (e) => { e.stopPropagation(); toggleExactFacet(chip.token); };
+    el.onkeydown = (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggleExactFacet(chip.token); }
+    };
+    quickWrap.appendChild(el);
+  });
+  body.appendChild(quickWrap);
   ordered.forEach(({ name, count, kind }) => {
     const el = document.createElement('span');
     el.className = 'facet' + (kind === 'on' ? ' on' : (kind === 'excl' ? ' excl' : ''));
@@ -5295,6 +5399,50 @@ function deleteView(name) {
   saveViews(loadViews().filter(v => v.name !== name));
   renderViews();
 }
+// Переименовать представление (имя должно остаться уникальным).
+async function renameView(name) {
+  const list = loadViews();
+  const v = list.find(x => x.name === name);
+  if (!v) return false;
+  const next = await dialogPrompt('Новое название представления:', name);
+  if (next == null || next === false) return false;
+  const nm = String(next).trim();
+  if (!nm || nm === name) return false;
+  if (list.some(x => x !== v && x.name === nm)) {
+    notify('⚠️ Представление с таким названием уже есть');
+    return false;
+  }
+  v.name = nm;
+  saveViews(list);
+  renderViews();
+  notify('✏️ Представление переименовано: ' + nm);
+  return true;
+}
+// Перезаписать сохранённый фильтр текущими запросом, сортировкой и областью.
+function updateView(name) {
+  const list = loadViews();
+  const v = list.find(x => x.name === name);
+  if (!v) return false;
+  if (!searchQuery.trim()) { notify('⚠️ Сначала задайте фильтр'); return false; }
+  v.query = searchQuery.trim();
+  v.sort = sortMode;
+  v.scope = searchScope;
+  saveViews(list);
+  renderViews();
+  notify('💾 Представление обновлено: ' + name);
+  return true;
+}
+// Меню действий с сохранённым представлением.
+function viewMenu(v, x, y) {
+  showCtxMenu(x, y, [
+    { label: '▶ Применить', run: () => applyView(v) },
+    { label: '💾 Обновить текущим фильтром', run: () => updateView(v.name) },
+    { label: '✏️ Переименовать', run: () => renameView(v.name) },
+    '-',
+    { label: '🗑 Удалить', run: () => deleteView(v.name), danger: true }
+  ]);
+}
+
 // Применить сохранённое представление: запрос, область поиска и сортировка.
 // Строка (старый формат) тоже принимается — как представление с одним запросом.
 function applyView(view) {
@@ -5319,10 +5467,23 @@ function renderViews() {
     const nm = document.createElement('span'); nm.className = 'vn'; nm.textContent = v.name;
     const q = document.createElement('span'); q.className = 'vq'; q.textContent = v.query;
     q.title = 'Сортировка: ' + sortLabel(v.sort || 'updated') + (v.scope === 'folder' ? ', область: в папке' : '');
+    const more = document.createElement('span'); more.className = 'vm'; more.textContent = '⋯';
+    more.title = 'Изменить представление';
+    more.onclick = (e) => {
+      e.stopPropagation();
+      const r = more.getBoundingClientRect();
+      viewMenu(v, r.left, r.bottom + 4);
+    };
     const x = document.createElement('span'); x.className = 'vx'; x.textContent = '✕'; x.title = 'Удалить представление';
     x.onclick = (e) => { e.stopPropagation(); deleteView(v.name); };
-    row.appendChild(nm); row.appendChild(q); row.appendChild(x);
+    row.appendChild(nm); row.appendChild(q); row.appendChild(more); row.appendChild(x);
     row.onclick = () => applyView(v);
+    row.oncontextmenu = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      closeCtxMenu();
+      viewMenu(v, e.clientX, e.clientY);
+    };
     list.appendChild(row);
   });
 }
@@ -6203,6 +6364,8 @@ function noteContextMenu(x, y, noteId) {
     { label: '📁 Переместить в…', run: () => moveMenuFor(n.id) },
     { label: '★ Оценка' + (clampRating(n.rating) ? ' (' + clampRating(n.rating) + '/5)' : ''), run: () => ratingMenuFor(n.id) },
     { label: '📑 Дублировать', run: () => duplicateNote(n.id) },
+    { label: '🔗 Копировать [[ссылку]]', run: () => copyWikiLink(n.id) },
+    { label: '📋 Копировать текст', run: () => copyNoteText(n.id) },
     { label: '🕘 История версий', run: () => historyMenuFor(n.id) },
     '-',
     { label: '⬇️ Экспорт (Markdown)', run: () => exportMd([n]) },
@@ -6211,6 +6374,45 @@ function noteContextMenu(x, y, noteId) {
     '-',
     { label: '🗑️ Удалить', run: () => deleteNote(n.id), danger: true }
   ]);
+}
+// Копирование в буфер обмена: Clipboard API, а при недоступности — скрытая
+// textarea + execCommand (работает и на file://, где clipboard может быть закрыт).
+function copyText(text, okMessage) {
+  const value = String(text == null ? '' : text);
+  const done = () => notify(okMessage || '📋 Скопировано');
+  const fallback = () => {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = value;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand && document.execCommand('copy');
+      document.body.removeChild(ta);
+      if (ok) { done(); return true; }
+    } catch (e) { /* ниже покажем предупреждение */ }
+    notify('⚠️ Не удалось скопировать');
+    return false;
+  };
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(value).then(done).catch(fallback);
+      return true;
+    }
+  } catch (e) { /* переходим к fallback */ }
+  return fallback();
+}
+function copyWikiLink(noteId) {
+  const n = noteById(noteId);
+  if (!n) return false;
+  return copyText('[[' + (n.title || UNTITLED) + ']]', '🔗 Ссылка скопирована');
+}
+function copyNoteText(noteId) {
+  const n = noteById(noteId);
+  if (!n) return false;
+  return copyText((n.title || UNTITLED) + (n.body ? '\n\n' + n.body : ''), '📋 Текст заметки скопирован');
 }
 // Дублировать заметку (копия с теми же тэгами, история не копируется).
 function duplicateNote(noteId) {
@@ -6801,6 +7003,17 @@ document.addEventListener('keydown', e => {
     if (editorOpen) { e.preventDefault(); saveNote(); }
     return;
   }
+  // Markdown-форматирование в теле заметки: Ctrl/Cmd+B — жирный, I — курсив,
+  // Shift+K — ссылка. Обычный Ctrl+K занят командной палитрой.
+  if (editorOpen && (e.ctrlKey || e.metaKey) && !e.altKey) {
+    const t = e.target;
+    if (t && t.id === 'fBody') {
+      const key = e.key.toLowerCase();
+      if (!e.shiftKey && key === 'b') { e.preventDefault(); applyMdFormat('bold'); return; }
+      if (!e.shiftKey && key === 'i') { e.preventDefault(); applyMdFormat('italic'); return; }
+      if (e.shiftKey && key === 'k') { e.preventDefault(); applyMdFormat('link'); return; }
+    }
+  }
   // Ctrl/Cmd+K — единый быстрый переход: папки/тэги, заметки, команды.
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault();
@@ -7231,6 +7444,15 @@ function attachMarkdownEvents($) {
     if (mdMode === 'preview' || mdMode === 'split') scheduleMdPreview();
   });
   $('fBody').addEventListener('scroll', syncMdScroll);
+  $('fBody').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (continueMarkdownList(e.target)) e.preventDefault();
+    }
+    if (e.key === 'Tab' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      indentMarkdown(e.target, e.shiftKey);
+    }
+  });
   // Поиск и замена в редакторе
   $('mdFindBtn').addEventListener('click', () => {
     const bar = document.getElementById('mdFindbar');
@@ -7401,6 +7623,7 @@ if (window) {
     prepareUndo, undoLastAction, redoLastAction, clearUndoHistory,
     openFindBar, closeFindBar, mdFindNext, mdReplaceOne, mdReplaceAll, updateMdToc,
     humanDate, duplicateNote, exportFound, exportMdText, exportTxtText, parseMarkdownImport, rateNoteFromCard, setNoteRating, makeSnapshotNow, toggleTaskLine, toggleNoteTask, ratingFacetToken, toggleRatingFacet, saveLastView, restoreLastView,
+    copyText, copyWikiLink, copyNoteText, listPrefixAt, continueMarkdownList, indentMarkdown,
     openEditor, saveNote, deleteNote,
     openNoteView, closeNoteView, renderNoteView, goToPath, openWikiLink, noteByTitle, noteBacklinks, wikiLinkTitles, noteById,
     tagsLowerOf, applyTreeState, safeCssColor, scheduleMdPreview, cancelMdPreview,
@@ -7424,7 +7647,7 @@ if (window) {
     get notesRenderLimit() { return notesRenderLimit; },
     get virtualActive() { return virtualActive; },
     get bulkSelected() { return [...bulkSelected]; },
-    renderFacets, cycleFacet, toggleFacets, addView, deleteView, applyView, loadViews, saveViews, resetFacets,
+    renderFacets, cycleFacet, toggleFacets, addView, deleteView, applyView, loadViews, saveViews, resetFacets, renameView, updateView, viewMenu, renderViews, toggleExactFacet, joinQueryTokens,
     get collapsed() { return collapsed; },
     get sortMode() { return sortMode; }
   };
