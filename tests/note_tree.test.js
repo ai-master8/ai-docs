@@ -1872,7 +1872,7 @@ describe('Автоподгрузка и объединение импорта (P
         { id: 'n3', title: 'Добавлена', body: '', tagIds: [], updated: 30 }
       ]
     });
-    deepEqual(res, { added: 1, updated: 1, total: 3 });
+    deepEqual(res, { added: 1, updated: 1, conflicts: 0, total: 3 });
     strictEqual(app.noteById('n1').title, 'Новая');
     strictEqual(app.noteById('n2').title, 'Не трогать');
     ok(app.noteById('n3'), 'новая заметка добавлена');
@@ -2315,3 +2315,94 @@ describe('Виртуализация списка заметок', () => {
     }
   });
 });
+
+describe('Надёжность данных: конфликты вкладок и черновики', () => {
+  test('при конфликте сохраняются обе версии, проигравшая — как копия', () => {
+    seed([], [{ id: 'n1', title: 'Моя версия', body: 'мой текст', tagIds: [], updated: 10 }]);
+    const res = app.mergeImportedData({
+      tags: [],
+      notes: [{ id: 'n1', title: 'Чужая версия', body: 'чужой текст', tagIds: [], updated: 20 }]
+    }, { preserveConflicts: true });
+    strictEqual(res.conflicts, 1, 'зафиксирована одна конфликтная копия');
+    strictEqual(app.state.notes.length, 2, 'обе версии остались в архиве');
+    strictEqual(app.noteById('n1').title, 'Чужая версия', 'побеждает более новая версия');
+    const copy = app.state.notes.find(n => n.id !== 'n1');
+    ok(copy.title.indexOf('Моя версия') === 0, 'в копии сохранён проигравший заголовок');
+    ok(copy.title.includes('(конфликтная копия)'), 'копия помечена суффиксом');
+    strictEqual(copy.body, 'мой текст', 'текст проигравшей версии не потерян');
+    ok(!copy.pinned, 'копия не закреплена');
+  });
+
+  test('одинаковые версии не порождают конфликтную копию', () => {
+    seed([], [{ id: 'n1', title: 'Одно и то же', body: 'текст', tagIds: [], rating: 3, updated: 10 }]);
+    const res = app.mergeImportedData({
+      tags: [],
+      notes: [{ id: 'n1', title: 'Одно и то же', body: 'текст', tagIds: [], rating: 3, updated: 20 }]
+    }, { preserveConflicts: true });
+    strictEqual(res.conflicts, 0);
+    strictEqual(app.state.notes.length, 1);
+  });
+
+  test('устаревшая входящая версия тоже сохраняется копией', () => {
+    seed([], [{ id: 'n1', title: 'Актуальная', body: 'новое', tagIds: [], updated: 100 }]);
+    const res = app.mergeImportedData({
+      tags: [],
+      notes: [{ id: 'n1', title: 'Старая', body: 'старое', tagIds: [], updated: 50 }]
+    }, { preserveConflicts: true });
+    strictEqual(res.conflicts, 1);
+    strictEqual(app.noteById('n1').title, 'Актуальная', 'местная версия осталась основной');
+    const copy = app.state.notes.find(n => n.id !== 'n1');
+    ok(copy.title.indexOf('Старая') === 0, 'входящая версия сохранена копией');
+  });
+
+  test('обычный импорт без preserveConflicts не создаёт копий', () => {
+    seed([], [{ id: 'n1', title: 'Моя', body: '', tagIds: [], updated: 10 }]);
+    const res = app.mergeImportedData({
+      tags: [],
+      notes: [{ id: 'n1', title: 'Чужая', body: '', tagIds: [], updated: 20 }]
+    });
+    strictEqual(res.conflicts, 0);
+    strictEqual(app.state.notes.length, 1);
+  });
+
+  test('менеджер черновиков показывает и открывает несохранённый текст', () => {
+    seed([], [{ id: 'n1', title: 'Заметка', body: 'старое', tagIds: [], updated: 1 }]);
+    app.openEditor('n1');
+    document.getElementById('fTitle').value = 'Черновик из менеджера';
+    document.getElementById('fBody').value = 'несохранённый текст';
+    app.scheduleDraftSave();
+    app.flushDraftSave();
+    app.closeEditor({ silent: true });
+
+    const entries = app.draftEntries();
+    strictEqual(entries.length, 1);
+    strictEqual(entries[0].key, 'n1');
+
+    app.draftMenu();
+    const menu = document.getElementById('ctxMenu');
+    ok(menu.classList.contains('show'), 'меню черновиков открылось');
+    ok(menu.textContent.includes('Черновик из менеджера'), 'в меню виден заголовок черновика');
+
+    app.openDraft('n1');
+    strictEqual(app.editorOpen, true, 'редактор открыт');
+    strictEqual(document.getElementById('fTitle').value, 'Черновик из менеджера');
+    strictEqual(document.getElementById('fBody').value, 'несохранённый текст');
+    strictEqual(app.editorDirty(), true, 'черновик помечен как несохранённый');
+  });
+
+  test('черновик удалённой заметки открывается как новая заметка', () => {
+    seed([], [{ id: 'n1', title: 'Удалённая', body: '', tagIds: [], updated: 1 }]);
+    app.openEditor('n1');
+    document.getElementById('fTitle').value = 'Спасти текст';
+    app.scheduleDraftSave();
+    app.flushDraftSave();
+    app.closeEditor({ silent: true });
+    app.state.notes = [];
+    app.invalidateTree();
+
+    app.openDraft('n1');
+    strictEqual(app.editingId, null, 'открывается как новая заметка');
+    strictEqual(document.getElementById('fTitle').value, 'Спасти текст');
+  });
+});
+
