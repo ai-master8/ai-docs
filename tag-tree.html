@@ -235,6 +235,12 @@
   /* Кнопка «Показать ещё» для порционной отрисовки больших списков. */
   .notes-more { grid-column: 1 / -1; padding: 10px; border-radius: var(--radius); border: 1px dashed var(--border); background: transparent; color: var(--muted); cursor: pointer; font-size: 13px; }
   .notes-more:hover { color: var(--accent); border-color: var(--accent); }
+  /* Виртуализация большого списка: #notes становится блочным контейнером,
+     внутри — ряды карточек и два распорных блока (сверху/снизу). */
+  .notes.virtual { display: block; }
+  .notes.virtual .virt-row { display: grid; grid-template-columns: repeat(var(--virt-cols, 1), minmax(0, 1fr)); gap: 16px; align-items: stretch; margin-bottom: 16px; }
+  .notes.virtual .virt-spacer { width: 100%; }
+  .notes.virtual .note-card { content-visibility: visible; }
   /* Общие начертание/отступы заголовков MD, размер и цвет — по контексту */
   .md-h1, .md-h2, .md-h3 { font-weight: 700; }
   .note-card .preview .md-h1, .note-card .preview .md-h2, .note-card .preview .md-h3 { color: var(--text); margin: 2px 0; }
@@ -791,6 +797,7 @@
     <div class="modal-foot">
       <div class="spacer"></div>
       <button id="dialogCancelBtn">Отмена</button>
+      <button id="dialogThirdBtn" style="display:none"></button>
       <button id="dialogExtraBtn" style="display:none"></button>
       <button id="dialogOkBtn" class="primary">ОК</button>
     </div>
@@ -858,6 +865,11 @@ const IDB_VERSION = 1;
 // Ключи, которые живут в IndexedDB (всё остальное — в localStorage).
 const HEAVY_KEYS = [LS_KEY, LS_KEY + '_backup', SNAPSHOT_KEY, TRASH_KEY, DRAFT_KEY];
 const heavyKeySet = new Set(HEAVY_KEYS);
+// Снимки и корзина нужны не на каждом старте: их читаем лениво, чтобы не
+// поднимать мегабайты истории и удалённых заметок на первый экран.
+const LAZY_KEYS = [SNAPSHOT_KEY, TRASH_KEY];
+const lazyKeySet = new Set(LAZY_KEYS);
+const EAGER_HEAVY_KEYS = HEAVY_KEYS.filter(k => !lazyKeySet.has(k));
 
 const IDB_INIT_TIMEOUT = 3000;  // мс на открытие базы, дальше — фолбэк на localStorage
 const IDB_RETRY_MAX = 3;        // повторов записи перед предупреждением
@@ -878,8 +890,24 @@ let idbRetryPending = 0;       // запланированные повторы 
 let quotaRelieved = false;     // о нехватке места предупреждаем один раз
 let quotaReliefActive = false; // защита от рекурсии при освобождении места
 let lastRecovery = '';         // откуда подняли данные при загрузке: backup|snapshot
-// Отложенные записи настроек: частые вызовы склеиваются в одну запись.
+// Ревизии архива: номер растёт при каждой записи. Другая вкладка, сохранившая
+// более новую ревизию, помечает нашу копию устаревшей — перед записью спросим,
+// что делать, вместо молчаливого затирания.
+let dataRev = 0;               // ревизия загруженного/записанного состояния
+let knownRev = 0;              // максимальная известная ревизия (в т.ч. из другой вкладки)
+let dataSavedAt = 0;           // updatedAt последней записи
+let staleData = false;         // другая вкладка сохранила новее
+let conflictBusy = false;      // диалог разрешения конфликта уже открыт
 const deferredSettings = new Map(); // ключ -> { value, timer }
+// Ленивая загрузка снимков и корзины. До завершения чтения записи не
+// перезаписывают базу: новые элементы копятся в pending* и сливаются после.
+let snapshotsLoaded = false;
+let snapshotsLoading = null;       // Promise текущего чтения
+let pendingSnapshots = [];         // [{ snap, force }] — снимки до загрузки
+let trashLoaded = false;
+let trashLoading = null;
+let pendingTrash = [];             // удалённые заметки до загрузки
+let lazyLoadWarned = false;        // предупреждаем один раз за сессию
 
 function isQuotaError(err) {
   if (!err) return false;
@@ -892,12 +920,14 @@ function relieveQuota() {
   if (quotaReliefActive) return false;
   quotaReliefActive = true;
   try {
-    const snaps = loadSnapshots();
+    // Снимки/корзину в режиме базы не читаем синхронно: если они ещё не
+    // подняты, освобождать нечего — пусть сработает повтор записи.
+    const snaps = (idbMode && !snapshotsLoaded) ? [] : loadSnapshots();
     if (snaps.length > 1) {
       saveSnapshots(snaps.slice(0, Math.max(1, Math.floor(snaps.length / 2))));
       return true;
     }
-    const trash = loadTrash();
+    const trash = (idbMode && !trashLoaded) ? [] : loadTrash();
     if (trash.length > 1) {
       saveTrash(trash.slice(0, Math.max(1, Math.floor(trash.length / 2))));
       return true;
@@ -1094,23 +1124,28 @@ function flushIdbWrites() {
 }
 // Дождаться, пока очередь записи опустеет (тесты и аккуратное закрытие).
 function idbIdle() {
-  return new Promise(resolve => {
+  // Сначала дожидаемся ленивых чтений: после них могут появиться новые записи.
+  const lazy = [];
+  if (snapshotsLoading) lazy.push(snapshotsLoading.catch(() => {}));
+  if (trashLoading) lazy.push(trashLoading.catch(() => {}));
+  return Promise.all(lazy).then(() => new Promise(resolve => {
     const check = () => {
       if (idbWriting.size === 0 && idbRetryPending === 0) resolve();
       else setTimeout(check, 5);
     };
     check();
-  });
+  }));
 }
 // Один раз при старте: открыть базу, поднять тяжёлые ключи в память и
 // перенести данные из localStorage (миграция со старой версии).
 async function storageInit() {
   if (typeof indexedDB === 'undefined' || !indexedDB) return false;
   try {
-    const values = await withTimeout(idbGetAll(HEAVY_KEYS), IDB_INIT_TIMEOUT, 'IndexedDB не открылась за ' + IDB_INIT_TIMEOUT + ' мс');
+    // Снимки и корзину при старте не читаем: их поднимут ensure*Loaded().
+    const values = await withTimeout(idbGetAll(EAGER_HEAVY_KEYS), IDB_INIT_TIMEOUT, 'IndexedDB не открылась за ' + IDB_INIT_TIMEOUT + ' мс');
     idbMode = true;
     Object.keys(values).forEach(k => { memStore[k] = values[k]; });
-    await migrateLsToIdb(values);
+    await migrateLsToIdb(values, EAGER_HEAVY_KEYS);
     return true;
   } catch (e) {
     idbAbandoned = true;
@@ -1123,8 +1158,8 @@ async function storageInit() {
 }
 // Перенести тяжёлые ключи из localStorage в IndexedDB. Копия в localStorage
 // удаляется только после подтверждённой записи в базу.
-async function migrateLsToIdb(values) {
-  for (const key of HEAVY_KEYS) {
+async function migrateLsToIdb(values, keys) {
+  for (const key of (keys || HEAVY_KEYS)) {
     let raw = null;
     try { raw = localStorage.getItem(key); } catch (e) { raw = null; }
     // В базе уже есть значение — старая копия в localStorage больше не нужна.
@@ -1151,10 +1186,22 @@ function storageClearMemory() {
   idbRetryPending = 0;
   snapshotCache = null;
   trashCache = null;
+  snapshotsLoaded = false;
+  snapshotsLoading = null;
+  pendingSnapshots = [];
+  trashLoaded = false;
+  trashLoading = null;
+  pendingTrash = [];
+  lazyLoadWarned = false;
   snapshotSigCache = { ref: null, length: -1, sig: '' };
   lastViewJSON = null;
   lastCollapsedJSON = null;
   lastRecovery = '';
+  dataRev = 0;
+  knownRev = 0;
+  dataSavedAt = 0;
+  staleData = false;
+  conflictBusy = false;
   quotaRelieved = false;
   cancelDeferredSettings();
   cancelDeferredStateSave();
@@ -1464,6 +1511,11 @@ function applyData(data) {
 
 // Разобрать сохранённые данные. Возвращает объект данных или null, если строка
 // пустая, битая или не похожа на архив (тогда loadState попробует резерв).
+// Номер ревизии из конверта данных (старые файлы без rev считаются нулевыми).
+function envelopeRev(data) {
+  const r = data && Number(data.rev);
+  return Number.isFinite(r) && r > 0 ? Math.floor(r) : 0;
+}
 function parseStoredState(raw) {
   if (raw === null || raw === '' || raw === undefined) return null;
   let data;
@@ -1471,7 +1523,7 @@ function parseStoredState(raw) {
   return isValidData(data) ? data : null;
 }
 
-function loadState() {
+async function loadState() {
   const raw = storageGet(LS_KEY);
   const hasData = raw !== null && raw !== '';
   let data = parseStoredState(raw);
@@ -1482,13 +1534,19 @@ function loadState() {
     const backup = parseStoredState(storageGet(LS_KEY + '_backup'));
     if (backup) { data = backup; lastRecovery = 'backup'; }
     else {
-      const snaps = loadSnapshots();
+      // Снимки в базе читаются лениво — для восстановления их нужно дождаться.
+      const snaps = (idbMode && !snapshotsLoaded) ? await ensureSnapshotsLoaded() : loadSnapshots();
       const first = snaps.length ? snaps[0] : null;
       if (first && first.data && isValidData(first.data)) { data = first.data; lastRecovery = 'snapshot'; }
     }
   }
   state.notes = applyData(data || []);
   state.notes = state.notes.filter(n => !isEmptyNote(n));
+  // Ревизия: после полного чтения мы снова синхронны с хранилищем.
+  dataRev = envelopeRev(data);
+  knownRev = dataRev;
+  dataSavedAt = (data && Number(data.updatedAt)) || 0;
+  staleData = false;
   // Снимок состояния при загрузке страницы -> в резервный ключ localStorage.
   // Позволяет восстановить данные, если их перезапишет импорт/сбой (без консоли).
   if (state.notes.length > 0) {
@@ -1512,13 +1570,96 @@ function loadState() {
     notify('⚠️ Данные были повреждены — восстановлено из ' + src + ' (' + state.notes.length + ' заметок).');
   }
 }
-// Сохранить и заметки, и таблицу тэгов (версия 2).
+// Сохранить и заметки, и таблицу тэгов (версия 2). Перед записью проверяем,
+// не сохранила ли другая вкладка более новую ревизию: тогда сначала спрашиваем.
 function saveState() {
   cancelDeferredStateSave();
-  storageSet(LS_KEY, JSON.stringify({ version: 2, tags: state.tags, notes: state.notes }));
+  if (staleData) {
+    requestTabConflict();
+    return false;
+  }
+  writeStateEnvelope();
+  return true;
+}
+// Непосредственная запись текущего состояния с новой ревизией.
+function writeStateEnvelope() {
+  dataRev = Math.max(dataRev, knownRev) + 1;
+  knownRev = dataRev;
+  dataSavedAt = Date.now();
+  storageSet(LS_KEY, JSON.stringify({
+    version: 2, rev: dataRev, updatedAt: dataSavedAt,
+    tags: state.tags, notes: state.notes
+  }));
   maybeSnapshot(); // снимок при изменении состава заметок (остальные вызовы — no-op)
-  // Сообщаем другим вкладкам, что данные изменились (только предупреждение).
-  if (tabChannel) { try { tabChannel.postMessage({ type: 'saved', id: TAB_ID, ts: Date.now() }); } catch (e) {} }
+  // Сообщаем другим вкладкам ревизию, чтобы они не перезаписали нас молча.
+  if (tabChannel) {
+    try { tabChannel.postMessage({ type: 'saved', id: TAB_ID, ts: Date.now(), rev: dataRev, count: state.notes.length }); } catch (e) {}
+  }
+}
+// Пометить локальную копию устаревшей (сообщение из другой вкладки).
+function markTabStale(rev) {
+  const r = Number(rev) || 0;
+  if (r > knownRev) knownRev = r;
+  if (r <= dataRev || staleData) return;
+  staleData = true;
+  notify('⚠️ Другая вкладка сохранила более новые данные. При следующем сохранении выберите: перечитать, объединить или перезаписать.');
+}
+// Свежее чтение архива из хранилища в обход кэша (для разрешения конфликта).
+function readFreshState() {
+  if (!idbMode) return Promise.resolve(parseStoredState(storageGet(LS_KEY)));
+  return idbGetAll([LS_KEY]).then(values => {
+    const raw = Object.prototype.hasOwnProperty.call(values, LS_KEY) ? values[LS_KEY] : null;
+    return parseStoredState(raw);
+  }).catch(() => parseStoredState(memStore[LS_KEY] || null));
+}
+// Диалог конфликта: перечитать / объединить / перезаписать.
+function requestTabConflict() {
+  if (conflictBusy) return;
+  conflictBusy = true;
+  const run = async () => {
+    const revText = knownRev > dataRev ? ' (ревизия ' + knownRev + ')' : '';
+    const choice = await dialogShow({
+      title: 'Данные изменены в другой вкладке',
+      message: 'Пока вы работали, другая вкладка сохранила архив' + revText + '.\n\n'
+        + '«Перечитать» — отбросить правки этой вкладки и взять данные из хранилища.\n'
+        + '«Объединить» — оставить обе версии: заметки сопоставляются по id, побеждает более свежая.\n'
+        + '«Перезаписать» — сохранить текущую версию поверх изменений другой вкладки.',
+      okLabel: '🔄 Перечитать',
+      extraLabel: '🔗 Объединить',
+      thirdLabel: '💾 Перезаписать'
+    });
+    if (choice === true) {
+      staleData = false;
+      await reloadFromStorage(true);
+      notify('🔄 Данные перечитаны из хранилища — правки этой вкладки отброшены');
+      return;
+    }
+    if (choice === 'extra') {
+      const remote = await readFreshState();
+      if (remote) {
+        const res = mergeImportedData(remote);
+        notify('🔗 Объединено: +' + res.added + ', обновлено ' + res.updated + ' · всего ' + res.total);
+      } else {
+        notify('⚠️ Не удалось прочитать данные другой вкладки — сохранена локальная версия');
+      }
+      staleData = false;
+      writeStateEnvelope();
+      saveToFile();
+      renderAll();
+      renderViews();
+      return;
+    }
+    if (choice === 'third') {
+      staleData = false;
+      writeStateEnvelope();
+      saveToFile();
+      notify('💾 Локальная версия сохранена поверх изменений другой вкладки');
+    }
+    // Отмена: ничего не пишем, конфликт остаётся до следующего сохранения.
+  };
+  run().catch(err => {
+    notify('⚠️ Не удалось разрешить конфликт: ' + (err && err.message ? err.message : err));
+  }).finally(() => { conflictBusy = false; });
 }
 // Отложенная запись частых действий (оценка, задачи): при серии кликов
 // сериализуем архив один раз, а не на каждое нажатие. Как и настройки,
@@ -1569,18 +1710,87 @@ function saveCollapsed(immediate) {
 // Держим его в памяти: maybeSnapshot вызывается на каждое сохранение, и парсить
 // до пяти полных копий архива каждый раз слишком дорого.
 let snapshotCache = null;
-function loadSnapshots() {
-  if (snapshotCache) return snapshotCache;
+// Прочитать ленивый тяжёлый ключ: из IndexedDB, а при первом обращении — ещё и
+// из старой копии localStorage (с переносом в базу).
+function readLazyKey(key) {
+  if (!idbMode) {
+    try { return Promise.resolve(localStorage.getItem(key)); } catch (e) { return Promise.resolve(null); }
+  }
+  return idbGetAll([key]).then(values => {
+    if (Object.prototype.hasOwnProperty.call(values, key)) return values[key];
+    let raw = null;
+    try { raw = localStorage.getItem(key); } catch (e) { raw = null; }
+    if (raw === null || raw === '') return null;
+    return idbPut(key, raw).then(() => {
+      try { localStorage.removeItem(key); } catch (e) {}
+      return raw;
+    }, () => raw); // база не приняла — оставляем копию в localStorage
+  });
+}
+function lazyLoadFailed(label) {
+  if (lazyLoadWarned) return;
+  lazyLoadWarned = true;
+  notify('⚠️ Не удалось прочитать ' + label + '. Откройте Ctrl+K → «Перечитать данные из хранилища».');
+}
+function snapshotsFinish(raw) {
+  let list = [];
   try {
-    const raw = storageGet(SNAPSHOT_KEY);
     const arr = raw ? JSON.parse(raw) : [];
-    snapshotCache = Array.isArray(arr) ? arr : [];
-  } catch (e) { snapshotCache = []; }
+    list = Array.isArray(arr) ? arr : [];
+  } catch (e) { list = []; }
+  const hadPending = pendingSnapshots.length > 0;
+  const seen = new Set(list.map(s => s && s.sig).filter(Boolean));
+  pendingSnapshots.forEach(entry => {
+    const snap = entry && entry.snap;
+    if (!snap || !snap.sig || seen.has(snap.sig)) return;
+    const last = list[0];
+    // Прореживание автоснимков работает и для отложенных до загрузки.
+    if (!entry.force && last && (Date.now() - Number(last.ts || 0)) < SNAPSHOT_MIN_INTERVAL) return;
+    list.unshift(snap);
+    seen.add(snap.sig);
+  });
+  pendingSnapshots = [];
+  snapshotCache = list.slice(0, SNAPSHOT_MAX);
+  snapshotsLoaded = true;
+  snapshotsLoading = null;
+  if (idbMode) memStore[SNAPSHOT_KEY] = JSON.stringify(snapshotCache);
+  if (hadPending) storageSet(SNAPSHOT_KEY, JSON.stringify(snapshotCache));
   return snapshotCache;
+}
+// Поднять снимки из базы (или localStorage) один раз. До завершения чтения
+// maybeSnapshot складывает новые снимки в pendingSnapshots.
+function ensureSnapshotsLoaded() {
+  if (snapshotsLoaded) return Promise.resolve(snapshotCache || []);
+  if (snapshotsLoading) return snapshotsLoading;
+  let req;
+  try { req = readLazyKey(SNAPSHOT_KEY); } catch (e) { req = Promise.resolve(null); }
+  snapshotsLoading = withTimeout(req, IDB_INIT_TIMEOUT, 'Снимки не прочитались за ' + IDB_INIT_TIMEOUT + ' мс')
+    .then(snapshotsFinish, () => {
+      snapshotsLoading = null;
+      lazyLoadFailed('снимки');
+      return snapshotCache || [];
+    });
+  return snapshotsLoading;
+}
+function loadSnapshots() {
+  if (snapshotsLoaded) return snapshotCache;
+  if (!idbMode) {
+    // localStorage читается синхронно — ленивость нужна только для базы.
+    snapshotsFinish(storageGet(SNAPSHOT_KEY));
+    return snapshotCache;
+  }
+  ensureSnapshotsLoaded(); // фоном; до ответа отдаём пустой список
+  return snapshotCache || (snapshotCache = []);
 }
 function saveSnapshots(list) {
   const trimmed = list.slice(0, SNAPSHOT_MAX);
   snapshotCache = trimmed;
+  if (!snapshotsLoaded && idbMode) {
+    // Существующая история ещё не прочитана — не затираем её.
+    pendingSnapshots = trimmed.map(snap => ({ snap, force: true }));
+    ensureSnapshotsLoaded();
+    return;
+  }
   storageSet(SNAPSHOT_KEY, JSON.stringify(trimmed));
 }
 // Сигнатура состава заметок (count:ids) для maybeSnapshot. Пересчитываем
@@ -1597,15 +1807,9 @@ function notesSignature() {
 // Автоснимки прореживаем: даже при активной работе не чаще раза в 5 минут,
 // иначе каждое добавление/удаление заметки плодит полную копию архива.
 const SNAPSHOT_MIN_INTERVAL = 5 * 60 * 1000;
-// Сделать снимок текущего состояния, если состав заметок изменился с прошлого снимка.
-function maybeSnapshot(force) {
-  if (state.notes.length === 0) return false;
-  const list = loadSnapshots(); // из кэша: без JSON.parse
-  const signature = notesSignature();
-  const lastSig = list.length ? list[0].sig : null;
-  if (!force && signature === lastSig) return false;
-  if (!force && list.length && (Date.now() - Number(list[0].ts || 0)) < SNAPSHOT_MIN_INTERVAL) return false;
-  const snapshot = {
+// Полная копия текущего архива для снимка.
+function makeSnapshot(signature) {
+  return {
     ts: Date.now(),
     sig: signature,
     count: state.notes.length,
@@ -1614,7 +1818,26 @@ function maybeSnapshot(force) {
       notes: state.notes.map(n => ({ ...n, tagIds: (n.tagIds || []).slice(), history: (n.history || []).map(h => ({ ...h })) }))
     }
   };
-  list.unshift(snapshot);
+}
+// Сделать снимок текущего состояния, если состав заметок изменился с прошлого снимка.
+function maybeSnapshot(force) {
+  if (state.notes.length === 0) return false;
+  const signature = notesSignature();
+  if (!snapshotsLoaded && idbMode) {
+    // Ещё не знаем последний снимок — откладываем до загрузки, но не плодим
+    // одинаковые подписи и не теряем ручной снимок.
+    const pendingSigs = new Set(pendingSnapshots.map(e => e && e.snap && e.snap.sig).filter(Boolean));
+    if (!force && pendingSigs.has(signature)) return false;
+    pendingSnapshots.unshift({ snap: makeSnapshot(signature), force: !!force });
+    pendingSnapshots = pendingSnapshots.slice(0, SNAPSHOT_MAX);
+    ensureSnapshotsLoaded();
+    return true;
+  }
+  const list = loadSnapshots(); // из кэша: без JSON.parse
+  const lastSig = list.length ? list[0].sig : null;
+  if (!force && signature === lastSig) return false;
+  if (!force && list.length && (Date.now() - Number(list[0].ts || 0)) < SNAPSHOT_MIN_INTERVAL) return false;
+  list.unshift(makeSnapshot(signature));
   saveSnapshots(list);
   return true;
 }
@@ -1627,7 +1850,8 @@ function makeSnapshotNow() {
   return true;
 }
 // Восстановить состояние из снимка по индексу.
-function restoreSnapshot(index) {
+async function restoreSnapshot(index) {
+  if (idbMode && !snapshotsLoaded) await ensureSnapshotsLoaded();
   const list = loadSnapshots();
   const snap = list[index];
   if (!snap || !snap.data) { notify('⚠️ Снимок не найден'); return false; }
@@ -1645,27 +1869,77 @@ function restoreSnapshot(index) {
 // Кэш в памяти: moveToTrash/trashMenu читают корзину часто, а JSON.parse
 // двадцати полных заметок при каждом удалении не нужен.
 let trashCache = null;
-function loadTrash() {
-  if (trashCache) return trashCache;
+function trashFinish(raw) {
+  let list = [];
   try {
-    const a = JSON.parse(storageGet(TRASH_KEY) || '[]');
-    trashCache = Array.isArray(a) ? a : [];
-  } catch (e) { trashCache = []; }
+    const a = raw ? JSON.parse(raw) : [];
+    list = Array.isArray(a) ? a : [];
+  } catch (e) { list = []; }
+  const hadPending = pendingTrash.length > 0;
+  if (hadPending) {
+    // Свежие удаления встают впереди прочитанных.
+    list = pendingTrash.concat(list).slice(0, TRASH_MAX);
+    pendingTrash = [];
+  }
+  trashCache = list.slice(0, TRASH_MAX);
+  trashLoaded = true;
+  trashLoading = null;
+  if (idbMode) memStore[TRASH_KEY] = JSON.stringify(trashCache);
+  if (hadPending) storageSet(TRASH_KEY, JSON.stringify(trashCache));
   return trashCache;
+}
+function ensureTrashLoaded() {
+  if (trashLoaded) return Promise.resolve(trashCache || []);
+  if (trashLoading) return trashLoading;
+  let req;
+  try { req = readLazyKey(TRASH_KEY); } catch (e) { req = Promise.resolve(null); }
+  trashLoading = withTimeout(req, IDB_INIT_TIMEOUT, 'Корзина не прочиталась за ' + IDB_INIT_TIMEOUT + ' мс')
+    .then(trashFinish, () => {
+      trashLoading = null;
+      lazyLoadFailed('корзину');
+      return trashCache || [];
+    });
+  return trashLoading;
+}
+function loadTrash() {
+  if (trashLoaded) return trashCache;
+  if (!idbMode) {
+    trashFinish(storageGet(TRASH_KEY));
+    return trashCache;
+  }
+  ensureTrashLoaded();
+  return trashCache || (trashCache = []);
 }
 function saveTrash(list) {
   const trimmed = list.slice(0, TRASH_MAX);
   trashCache = trimmed;
+  if (!trashLoaded && idbMode) {
+    pendingTrash = trimmed.map(item => item);
+    ensureTrashLoaded();
+    return;
+  }
   storageSet(TRASH_KEY, JSON.stringify(trimmed));
 }
 // Убрать заметку в корзину (перед удалением из state.notes).
 function moveToTrash(n) {
+  const item = { deleted: Date.now(), note: JSON.parse(JSON.stringify(n)) };
+  if (!trashLoaded && idbMode) {
+    pendingTrash.unshift(item);
+    pendingTrash = pendingTrash.slice(0, TRASH_MAX);
+    ensureTrashLoaded();
+    return;
+  }
   const t = loadTrash();
-  t.unshift({ deleted: Date.now(), note: JSON.parse(JSON.stringify(n)) });
+  t.unshift(item);
   saveTrash(t);
 }
 // Восстановить заметку из корзины по индексу.
 function restoreFromTrash(index) {
+  if (!trashLoaded && idbMode) {
+    ensureTrashLoaded();
+    notify('⚠️ Корзина ещё загружается — откройте меню ещё раз');
+    return false;
+  }
   const t = loadTrash();
   const item = t[index];
   if (!item) { notify('⚠️ Запись не найдена'); return false; }
@@ -1684,6 +1958,7 @@ function restoreFromTrash(index) {
 }
 // Очистить корзину полностью.
 async function emptyTrash() {
+  await ensureTrashLoaded();
   const t = loadTrash();
   if (t.length === 0) { notify('🗑 Корзина пуста'); return; }
   const ok = await dialogConfirm('Очистить корзину (' + t.length + ' заметок)? Восстановить будет нельзя.');
@@ -1692,7 +1967,8 @@ async function emptyTrash() {
   notify('🗑 Корзина очищена');
 }
 // Подменю корзины (вызывается из меню «🕘 Версии данных» и палитры).
-function trashMenu() {
+async function trashMenu() {
+  if (idbMode && !trashLoaded) await ensureTrashLoaded();
   const t = loadTrash();
   const items = [];
   if (t.length === 0) items.push({ label: 'Корзина пуста', run: () => {} });
@@ -2930,6 +3206,22 @@ let notesRenderLimit = NOTES_CHUNK;
 let notesRenderKey = '';
 let notesTotalCount = 0; // сколько всего заметок в текущем списке (для подгрузки)
 let notesCurrentList = []; // отсортированный список текущего контекста (для догрузки)
+// Виртуализация: при большом списке в DOM живёт только видимое окно рядов,
+// а сверху/снизу стоят распорки высотой с неотрисованный остаток. Высоты
+// рядов измеряются после отрисовки и запоминаются.
+const VIRTUAL_THRESHOLD = 400;  // меньше — обычная порционная отрисовка
+const VIRTUAL_OVERSCAN = 6;     // рядов сверху/снизу от видимой области
+const VIRTUAL_ROW_GAP = 16;
+const VIRTUAL_ROW_ESTIMATE = 214;
+let virtualActive = false;
+let virtualColumns = 1;
+let virtualLastColumns = 1;
+let virtualRows = [];
+let virtualHeights = [];
+let virtualListKey = '';
+let virtualLastWidth = 0;
+let virtualRendered = { first: -1, last: -1 };
+let virtualScrollTick = false;
 // Массовое выделение карточек (Ctrl/Cmd+клик, Shift+клик по диапазону).
 let bulkSelected = new Set();
 let bulkAnchorId = null;
@@ -2971,6 +3263,18 @@ function toggleBulkSelection(id, forceAdd, cardEl) {
   updateBulkBar();
 }
 function bulkSelectRange(toId) {
+  if (virtualActive) {
+    const ids = notesCurrentList.map(n => n.id);
+    const to = ids.indexOf(toId);
+    if (to < 0) return;
+    let from = bulkAnchorId ? ids.indexOf(bulkAnchorId) : -1;
+    if (from < 0) from = to;
+    for (let i = Math.min(from, to); i <= Math.max(from, to); i++) bulkSelected.add(ids[i]);
+    bulkAnchorId = toId;
+    refreshBulkCards();
+    updateBulkBar();
+    return;
+  }
   const cards = [...document.querySelectorAll('#notes .note-card')];
   if (!cards.length || !toId) return;
   const to = cards.findIndex(c => c.dataset.noteId === toId);
@@ -3093,6 +3397,13 @@ async function bulkDelete() {
 function resetNotesRenderChunk() {
   notesRenderLimit = NOTES_CHUNK;
   notesRenderKey = '';
+  deactivateVirtual();
+  virtualColumns = 1;
+  virtualLastColumns = 1;
+  virtualListKey = '';
+  virtualHeights = [];
+  virtualRows = [];
+  virtualRendered = { first: -1, last: -1 };
 }
 // Подгрузить следующую порцию карточек (кнопка, прокрутка, клавиатура).
 function loadMoreNotes() {
@@ -3130,11 +3441,214 @@ function noteCardHtml(n) {
 function notesCardsHtml(list) {
   return list.map(noteCardHtml).join('');
 }
+// ---------- Виртуализация списка ----------
+// Сколько колонок помещается при ширине width. Повторяет CSS
+// grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)) с gap 16.
+function virtualColumnsFor(width, hasView) {
+  if (hasView) return 1;
+  if (!(width > 0)) return 1;
+  const usable = Math.max(0, width - 40); // padding .notes: 20 + 20
+  return Math.max(1, Math.floor((usable + VIRTUAL_ROW_GAP) / (260 + VIRTUAL_ROW_GAP)));
+}
+// Разбить список на ряды по columns карточек.
+function virtualChunk(list, columns) {
+  const cols = Math.max(1, columns || 1);
+  const rows = [];
+  for (let i = 0; i < list.length; i += cols) rows.push(list.slice(i, i + cols));
+  return rows;
+}
+// Начала рядов и общая высота. Каждый ряд занимает высоту + gap (margin-bottom).
+function virtualOffsets(heights) {
+  const offsets = new Array(heights.length);
+  let sum = 0;
+  for (let i = 0; i < heights.length; i++) {
+    offsets[i] = sum;
+    const h = Number(heights[i]) > 0 ? Number(heights[i]) : VIRTUAL_ROW_ESTIMATE;
+    sum += h + VIRTUAL_ROW_GAP;
+  }
+  return { offsets, total: sum };
+}
+// Диапазон рядов [first, last) для видимой области. Чистая функция — удобно
+// проверять тестами без реальной вёрстки.
+function virtualRange(total, offsets, scrollTop, viewport, overscan) {
+  if (!total) return [0, 0];
+  const over = Math.max(0, overscan || 0);
+  let first = 0;
+  let lo = 0, hi = total - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (offsets[mid] <= scrollTop) { first = mid; lo = mid + 1; }
+    else hi = mid - 1;
+  }
+  first = Math.max(0, first - over);
+  let last = first;
+  const bottom = scrollTop + Math.max(0, viewport || 0);
+  while (last < total && offsets[last] < bottom) last++;
+  last = Math.min(total, last + over);
+  return [first, last];
+}
+function calcVirtualColumns() {
+  const c = document.getElementById('notes');
+  const split = document.getElementById('contentSplit');
+  if (!c) return 1;
+  return virtualColumnsFor(c.clientWidth, !!(split && split.classList.contains('has-view')));
+}
+function virtualFindRendered(id) {
+  const cards = document.querySelectorAll('#notes .note-card');
+  for (const c of cards) if (c.dataset.noteId === id) return c;
+  return null;
+}
+function deactivateVirtual() {
+  if (!virtualActive) return;
+  virtualActive = false;
+  virtualRows = [];
+  virtualHeights = [];
+  virtualRendered = { first: -1, last: -1 };
+  // Возвращаемся к порционной отрисовке с начала, а не с «всего списка».
+  notesRenderLimit = NOTES_CHUNK;
+  const c = document.getElementById('notes');
+  if (c) { c.classList.remove('virtual'); c.style.removeProperty('--virt-cols'); }
+}
+// Обновить только распорки (когда диапазон рядов не изменился).
+function updateVirtualSpacers(offsets, total, first, last) {
+  const c = document.getElementById('notes');
+  if (!c) return;
+  const topEl = c.querySelector('[data-vspacer="top"]');
+  const botEl = c.querySelector('[data-vspacer="bottom"]');
+  if (topEl) topEl.style.height = (offsets[first] || 0) + 'px';
+  if (botEl) {
+    const after = last < offsets.length ? offsets[last] : total;
+    botEl.style.height = Math.max(0, total - after) + 'px';
+  }
+}
+function scheduleVirtualRender() {
+  if (virtualScrollTick) return;
+  virtualScrollTick = true;
+  const run = () => {
+    virtualScrollTick = false;
+    if (virtualActive) renderVirtualWindow();
+  };
+  if (window.requestAnimationFrame) window.requestAnimationFrame(run);
+  else setTimeout(run, 16);
+}
+// Отрисовать окно рядов вокруг текущей прокрутки.
+function renderVirtualWindow(force) {
+  const c = document.getElementById('notes');
+  if (!c || !virtualActive) return;
+  const total = virtualRows.length;
+  if (!total) { c.innerHTML = ''; return; }
+  const { offsets, total: totalHeight } = virtualOffsets(virtualHeights);
+  const viewport = Math.max(c.clientHeight || 0, 400);
+  const [first, last] = virtualRange(total, offsets, c.scrollTop, viewport, VIRTUAL_OVERSCAN);
+  if (!force && first === virtualRendered.first && last === virtualRendered.last) {
+    updateVirtualSpacers(offsets, totalHeight, first, last);
+    return;
+  }
+  const top = offsets[first] || 0;
+  let html = `<div class="virt-spacer" data-vspacer="top" style="height:${top}px"></div>`;
+  for (let i = first; i < last; i++) {
+    html += `<div class="virt-row" data-vrow="${i}">${notesCardsHtml(virtualRows[i])}</div>`;
+  }
+  html += '<div class="virt-spacer" data-vspacer="bottom"></div>';
+  c.innerHTML = html;
+  virtualRendered = { first, last };
+  // Измеряем реальные высоты: карточки разной высоты из-за заголовков и тэгов.
+  c.querySelectorAll('.virt-row').forEach((el, i) => {
+    const h = el.getBoundingClientRect().height || el.offsetHeight || 0;
+    if (h > 0) virtualHeights[first + i] = Math.round(h);
+    else if (!virtualHeights[first + i]) virtualHeights[first + i] = VIRTUAL_ROW_ESTIMATE;
+  });
+  // Подсветка поиска — только в отрисованном окне.
+  c.querySelectorAll('.preview').forEach(el => highlightElement(el, searchQuery));
+  // Если высоты изменились, распорка сверху меняет положение контента —
+  // компенсируем прокрутку, чтобы карточки не «прыгали».
+  const next = virtualOffsets(virtualHeights);
+  const newTop = next.offsets[first] || 0;
+  // Сначала обновляем распорки (чтобы scrollHeight был полным), затем
+  // компенсируем прокрутку — иначе браузер может её «обрезать».
+  updateVirtualSpacers(next.offsets, next.total, first, last);
+  if (newTop !== top) {
+    c.scrollTop = Math.max(0, c.scrollTop + (newTop - top));
+  }
+  updateBulkBar();
+  // После измерения окно могло сдвинуться — доберём в следующем кадре.
+  const [nf, nl] = virtualRange(total, next.offsets, c.scrollTop, viewport, VIRTUAL_OVERSCAN);
+  if (nf !== first || nl !== last) scheduleVirtualRender();
+}
+function renderVirtualNotes(notes) {
+  const c = document.getElementById('notes');
+  if (!c) return;
+  virtualActive = true;
+  c.classList.add('virtual');
+  virtualLastWidth = c.clientWidth;
+  const key = notes.length + ':' + notes.map(n => n.id).join(',');
+  virtualColumns = calcVirtualColumns();
+  if (key !== virtualListKey || virtualColumns !== virtualLastColumns) {
+    virtualListKey = key;
+    virtualLastColumns = virtualColumns;
+    virtualHeights = [];
+  }
+  virtualRows = virtualChunk(notes, virtualColumns);
+  if (virtualHeights.length !== virtualRows.length) {
+    const old = virtualHeights;
+    virtualHeights = virtualRows.map((_, i) => old[i] || VIRTUAL_ROW_ESTIMATE);
+  }
+  c.style.setProperty('--virt-cols', String(virtualColumns));
+  virtualRendered = { first: -1, last: -1 };
+  renderVirtualWindow(true);
+}
+// Пересчитать колонки после открытия/закрытия правой панели.
+function refreshVirtualLayout() {
+  if (!virtualActive) return;
+  const c = document.getElementById('notes');
+  if (!c) return;
+  const cols = calcVirtualColumns();
+  const width = c.clientWidth;
+  if (cols === virtualColumns && Math.abs(width - virtualLastWidth) < 2) return;
+  const columnsChanged = cols !== virtualColumns;
+  virtualColumns = cols;
+  virtualLastColumns = cols;
+  virtualLastWidth = width;
+  if (columnsChanged) {
+    virtualHeights = [];
+    virtualRows = virtualChunk(notesCurrentList, cols);
+  }
+  c.style.setProperty('--virt-cols', String(cols));
+  virtualRendered = { first: -1, last: -1 };
+  renderVirtualWindow(true);
+}
+// Прокрутить к заметке по индексу и (при focus) поставить на неё фокус.
+function virtualEnsureVisible(index, focus) {
+  const c = document.getElementById('notes');
+  const note = notesCurrentList[index];
+  if (!c || !note || !virtualActive) return null;
+  let card = virtualFindRendered(note.id);
+  if (!card) {
+    const row = Math.floor(index / Math.max(1, virtualColumns));
+    const { offsets } = virtualOffsets(virtualHeights);
+    const top = offsets[row] || 0;
+    const h = virtualHeights[row] || VIRTUAL_ROW_ESTIMATE;
+    const viewport = c.clientHeight || 400;
+    if (top < c.scrollTop || top + h > c.scrollTop + viewport) {
+      c.scrollTop = Math.max(0, top - Math.floor((viewport - h) / 2));
+    }
+    virtualRendered = { first: -1, last: -1 };
+    renderVirtualWindow(true);
+    card = virtualFindRendered(note.id);
+  }
+  if (card && focus) { try { card.focus(); } catch (e) {} }
+  return card;
+}
 // Обновить кнопку «Показать ещё» и подпись в заголовке списка.
 function updateNotesMoreButton() {
   const container = document.getElementById('notes');
   if (!container) return;
   const btn = document.getElementById('notesMoreBtn');
+  if (virtualActive) {
+    if (btn) btn.remove();
+    container.title = 'Виртуальный список: ' + notesCurrentList.length + ' заметок';
+    return;
+  }
   const total = notesCurrentList.length;
   const shown = Math.min(notesRenderLimit, total);
   const hidden = total - shown;
@@ -3151,6 +3665,7 @@ function updateNotesMoreButton() {
 // Догрузить следующую порцию без пересборки уже показанных карточек.
 // Сохраняет прокрутку, фокус и не парсит заново весь список.
 function appendMoreNotes() {
+  if (virtualActive) return false;
   if (notesRenderLimit >= notesCurrentList.length) return false;
   const container = document.getElementById('notes');
   if (!container) return false;
@@ -3197,9 +3712,8 @@ function renderNotes() {
     const idx = notes.findIndex(n => n.id === focusId);
     if (idx >= notesRenderLimit) notesRenderLimit = idx + 1;
   }
-  const visible = notes.slice(0, notesRenderLimit);
-
   if (notes.length === 0) {
+    deactivateVirtual();
     let title, sub, actions;
     if (searchQuery) {
       title = searchScope === 'folder' ? 'В этой папке ничего не найдено' : 'Ничего не найдено';
@@ -3230,7 +3744,22 @@ function renderNotes() {
     if (newBtn) newBtn.onclick = () => openEditor();
     return;
   }
-  container.innerHTML = notesCardsHtml(visible);
+  // Большой список рисуем окном: в DOM только видимые ряды. В jsdom/скрытой
+  // панели clientHeight = 0 — там остаётся обычная порционная отрисовка.
+  const useVirtual = notes.length > VIRTUAL_THRESHOLD && container.clientHeight > 0;
+  if (useVirtual) {
+    notesRenderLimit = notes.length;
+    renderVirtualNotes(notes);
+    updateNotesMoreButton();
+    return;
+  }
+  deactivateVirtual();
+  // После выхода из виртуализации лимит сброшен — вернём в него выбранную заметку.
+  if (focusId) {
+    const idx = notes.findIndex(n => n.id === focusId);
+    if (idx >= notesRenderLimit) notesRenderLimit = idx + 1;
+  }
+  container.innerHTML = notesCardsHtml(notes.slice(0, notesRenderLimit));
   updateNotesMoreButton();
   // Подсветка поиска — только в превью, по текстовым узлам (безопасно для HTML).
   container.querySelectorAll('.preview').forEach(el => highlightElement(el, searchQuery));
@@ -3239,6 +3768,11 @@ function renderNotes() {
 // End — к последней заметке всего списка. Догружаем порциями через rAF,
 // чтобы не рисовать десятки тысяч карточек одним синхронным innerHTML.
 function loadAllNotesForEnd() {
+  if (virtualActive) {
+    const last = notesCurrentList.length - 1;
+    if (last >= 0) virtualEnsureVisible(last, true);
+    return;
+  }
   let guard = 0;
   const step = () => {
     const more = appendMoreNotes();
@@ -3266,6 +3800,20 @@ function notesKeyNav(e) {
   const active = document.activeElement;
   const card = active && active.closest ? active.closest('#notes .note-card') : null;
   if (!card) return;
+  // Виртуальный список: переходим по индексу, а не по соседним DOM-элементам
+  // (соседний ряд может быть ещё не отрисован).
+  if (virtualActive && /^(ArrowRight|ArrowDown|ArrowLeft|ArrowUp|Home|End)$/.test(e.key)) {
+    e.preventDefault();
+    const idx = notesCurrentList.findIndex(n => n.id === card.dataset.noteId);
+    if (idx < 0) return;
+    let target = idx;
+    if (e.key === 'Home') target = 0;
+    else if (e.key === 'End') target = notesCurrentList.length - 1;
+    else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') target = Math.min(notesCurrentList.length - 1, idx + 1);
+    else target = Math.max(0, idx - 1);
+    if (target !== idx) virtualEnsureVisible(target, true);
+    return;
+  }
   if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
     e.preventDefault();
     const next = adjacentNoteCard(card, 1);
@@ -3428,9 +3976,13 @@ function restoreLastView() {
 // ---------- Просмотр заметки ----------
 // Найти карточку заметки в списке (без CSS.escape — он есть не везде).
 function findNoteCard(id) {
-  const cards = document.querySelectorAll('#notes .note-card');
-  for (const c of cards) if (c.dataset.noteId === id) return c;
-  return null;
+  const found = virtualFindRendered(id);
+  if (found || !virtualActive) return found;
+  // Карточка за пределами окна — подгружаем её ряд и возвращаем элемент.
+  const idx = notesCurrentList.findIndex(n => n.id === id);
+  if (idx < 0) return null;
+  virtualEnsureVisible(idx, false);
+  return virtualFindRendered(id);
 }
 // Сбросить ширину списка, зафиксированную при открытии просмотра.
 function resetNoteListWidth() {
@@ -3567,9 +4119,11 @@ function renderNoteView() {
   split.classList.toggle('has-view', !!n || editorOpen);
   if (!n) {
     if (!editorOpen) resetNoteListWidth();
+    refreshVirtualLayout();
     box.innerHTML = '';
     return;
   }
+  refreshVirtualLayout();
   const upd = humanDate(n.updated || n.created);
   const cre = humanDate(n.created || n.updated);
   const tagsHtml = tagsOf(n).map(t => {
@@ -4752,6 +5306,8 @@ function serializeData() {
   return {
     app: 'note-tree',
     version: 2,
+    rev: dataRev,
+    updatedAt: dataSavedAt,
     exported: new Date().toISOString(),
     tags: state.tags,
     notes: state.notes,
@@ -4800,6 +5356,8 @@ function cloneStateSnapshot() {
 }
 function saveToFile() {
   if (!fileHandle) return fileWriteChain;
+  // Конфликт вкладок: не пишем устаревшую версию и в файл.
+  if (staleData) { requestTabConflict(); return fileWriteChain; }
   const handle = fileHandle;
   // payload и снимок состояния готовим синхронно, до первого await: иначе за
   // время записи state успеет измениться и в файл уйдёт другое состояние.
@@ -4905,6 +5463,8 @@ function storageProbe() {
 }
 // Показать отчёт о состоянии хранилища в модальном окне (без консоли браузера).
 async function showDiagnostics() {
+  // Размеры снимков и корзины нужны только здесь — поднимаем их по требованию.
+  await Promise.all([ensureSnapshotsLoaded(), ensureTrashLoaded()]);
   const p = storageProbe();
   const lines = [];
   lines.push('Режим открытия: ' + (p.isFile ? 'file:// (двойной клик по файлу)' : (location.protocol + '//' + location.host)));
@@ -4967,6 +5527,9 @@ async function showDiagnostics() {
 
 // Меню восстановления: версионные снимки + резервная копия файла/браузера.
 async function snapshotMenu() {
+  // В режиме localStorage снимки читаются синхронно, поэтому меню открывается
+  // в том же тике; ждём только ленивое чтение из IndexedDB.
+  if (idbMode && !snapshotsLoaded) await ensureSnapshotsLoaded();
   const list = loadSnapshots();
   const items = [];
   if (list.length === 0) {
@@ -4977,12 +5540,13 @@ async function snapshotMenu() {
       items.push({ label: '↩ ' + d + ' — ' + s.count + ' замет.', run: async () => {
         const summary = dataDiffSummary(state, s.data);
         const ok = await dialogConfirm('Восстановить состояние на ' + d + ' (' + s.count + ' заметок)?\n\n' + summary + '\n\nТекущие данные будут заменены.');
-        if (ok) restoreSnapshot(i);
+        if (ok) await restoreSnapshot(i);
       } });
     });
   }
   items.push('-');
   items.push({ label: '📸 Сделать снимок сейчас', run: () => makeSnapshotNow() });
+  if (idbMode && !trashLoaded) await ensureTrashLoaded();
   items.push({ label: '🗑 Корзина (' + loadTrash().length + ')', run: () => trashMenu() });
   items.push({ label: '♻️ Резервная копия (файл/браузер)', run: () => restoreFromBackup() });
   const btn = document.getElementById('backupBtn');
@@ -5956,7 +6520,7 @@ document.addEventListener('touchend', (e) => {
 // ---------- Универсальный диалог (ввод/подтверждение) ----------
 // Замена браузерных prompt/confirm, которые могут быть заблокированы политиками.
 let dialogResolve = null;
-function dialogShow({ title, message, input = false, label = '', value = '', okLabel = 'ОК', extraLabel = '' }) {
+function dialogShow({ title, message, input = false, label = '', value = '', okLabel = 'ОК', extraLabel = '', thirdLabel = '' }) {
   return new Promise((resolve) => {
     // Защита от вложенных вызовов: если диалог уже открыт — закрываем предыдущий,
     // иначе его промис зависнет навсегда (единственный dialogResolve).
@@ -5965,10 +6529,13 @@ function dialogShow({ title, message, input = false, label = '', value = '', okL
     document.getElementById('dialogTitle').textContent = title;
     document.getElementById('dialogMsg').textContent = message;
     const extraBtn = document.getElementById('dialogExtraBtn');
+    const thirdBtn = document.getElementById('dialogThirdBtn');
     const okBtn = document.getElementById('dialogOkBtn');
     okBtn.textContent = okLabel;
     if (extraLabel) { extraBtn.textContent = extraLabel; extraBtn.style.display = 'inline-block'; }
     else { extraBtn.style.display = 'none'; }
+    if (thirdLabel) { thirdBtn.textContent = thirdLabel; thirdBtn.style.display = 'inline-block'; }
+    else { thirdBtn.style.display = 'none'; }
     const wrap = document.getElementById('dialogInputWrap');
     const inputEl = document.getElementById('dialogInput');
     if (input) {
@@ -6216,6 +6783,16 @@ function attachLifecycleEvents() {
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') flushPending();
   });
+  // При изменении ширины окна большой список пересчитывает колонки и окно.
+  let notesResizeTimer = null;
+  window.addEventListener('resize', () => {
+    if (notesResizeTimer) clearTimeout(notesResizeTimer);
+    notesResizeTimer = setTimeout(() => {
+      notesResizeTimer = null;
+      if (virtualActive) refreshVirtualLayout();
+      else if (notesCurrentList.length > VIRTUAL_THRESHOLD) renderNotes();
+    }, 150);
+  }, { passive: true });
 }
 // Шапка: файл, версии данных, диагностика, экспорт/импорт, тема и новая заметка.
 function attachHeaderEvents($) {
@@ -6242,6 +6819,7 @@ function attachNotesEvents($) {
   // Автоподгрузка следующей порции при прокрутке к концу списка.
   let notesScrollTick = false;
   $('notes').addEventListener('scroll', () => {
+    if (virtualActive) { scheduleVirtualRender(); return; }
     if (notesScrollTick) return;
     notesScrollTick = true;
     const run = () => {
@@ -6510,6 +7088,7 @@ function attachDialogEvents($) {
     dialogClose(result);
   });
   $('dialogCancelBtn').addEventListener('click', () => dialogClose(false));
+  $('dialogThirdBtn').addEventListener('click', () => dialogClose('third'));
   $('dialogExtraBtn').addEventListener('click', () => dialogClose('extra'));
   $('dialogCloseBtn').addEventListener('click', () => dialogClose(false));
   $('dialogInput').addEventListener('keydown', (e) => {
@@ -6537,7 +7116,7 @@ function warnOtherTab(message) {
 }
 // Перечитать данные из IndexedDB/localStorage, отбросив локальную очередь записи.
 // Нужно, когда другая вкладка уже сохранила более свежие данные.
-async function reloadFromStorage() {
+async function reloadFromStorage(force) {
   const doReload = async () => {
     flushDraftSave();            // черновик редактора не конфликтует с архивом
     cancelDeferredStateSave();
@@ -6546,7 +7125,7 @@ async function reloadFromStorage() {
     try {
       if (typeof indexedDB !== 'undefined' && indexedDB) db = await storageInit();
     } catch (e) { db = false; }
-    loadState();
+    await loadState();
     clearUndoHistory();
     resetNavigation();
     renderAll();
@@ -6554,7 +7133,7 @@ async function reloadFromStorage() {
     tabSavedNotice = false;
     notify(db ? '🔄 Данные перечитаны из базы браузера' : '🔄 Данные перечитаны из localStorage');
   };
-  if (guardUnsavedEditor('В заметке есть несохранённые изменения. Перечитать данные из хранилища без сохранения?', doReload)) return;
+  if (!force && guardUnsavedEditor('В заметке есть несохранённые изменения. Перечитать данные из хранилища без сохранения?', doReload)) return;
   return doReload();
 }
 function initTabSync() {
@@ -6567,21 +7146,36 @@ function initTabSync() {
       if (!d || d.id === TAB_ID) return;
       if (d.type === 'hello') {
         // Отвечаем и сами предупреждаем: вторая вкладка уже открыта.
-        try { tabChannel.postMessage({ type: 'here', id: TAB_ID }); } catch (err) {}
+        try { tabChannel.postMessage({ type: 'here', id: TAB_ID, rev: dataRev }); } catch (err) {}
+        markTabStale(d.rev);
         warnOtherTab('⚠️ TagTree уже открыт в другой вкладке — изменения могут перезаписать друг друга. Работайте в одной или сделайте экспорт.');
       } else if (d.type === 'here') {
+        markTabStale(d.rev);
         warnOtherTab('⚠️ TagTree уже открыт в другой вкладке — изменения могут перезаписать друг друга. Работайте в одной или сделайте экспорт.');
-      } else if (d.type === 'saved' && !tabSavedNotice) {
-        tabSavedNotice = true;
-        notify('⚠️ Данные изменены в другой вкладке. Откройте Ctrl+K → «Перечитать данные из хранилища», чтобы не потерять изменения.');
+      } else if (d.type === 'saved') {
+        markTabStale(d.rev);
+        if (!tabSavedNotice) {
+          tabSavedNotice = true;
+          notify('⚠️ Данные изменены в другой вкладке. При следующем сохранении TagTree предложит перечитать, объединить или перезаписать.');
+        }
       }
     };
-    tabChannel.postMessage({ type: 'hello', id: TAB_ID });
+    tabChannel.postMessage({ type: 'hello', id: TAB_ID, rev: dataRev });
   } catch (e) { tabChannel = null; }
 }
+// localStorage-режим без BroadcastChannel: ловим запись другой вкладки.
+if (typeof window !== 'undefined' && window.addEventListener) {
+  window.addEventListener('storage', (e) => {
+    if (!e || e.key !== LS_KEY || !e.newValue) return;
+    try {
+      const d = JSON.parse(e.newValue);
+      if (d && d.rev) markTabStale(d.rev);
+    } catch (err) {}
+  });
+}
 // Обычный старт после подготовки хранилища.
-function startApp() {
-  loadState();
+async function startApp() {
+  await loadState();
   restoreLastView();
   initTreeCollapse();
   renderAll();
@@ -6594,7 +7188,9 @@ try {
   attachEvents();
   if (typeof indexedDB === 'undefined' || !indexedDB) {
     // Нет IndexedDB (старые браузеры, тесты в jsdom) — прежний путь через localStorage.
-    startApp();
+    startApp().catch(err => {
+      renderFatal('Не удалось запустить приложение: ' + (err && err.message ? err.message : err) + '. Проверьте консоль браузера (F12).');
+    });
   } else {
     // Сначала поднимаем тяжёлые данные из базы, затем грузим состояние.
     storageInit().then(startApp).catch(err => {
@@ -6614,6 +7210,7 @@ if (window) {
     clampRating, starsHtml, ratingText, taskStats, orphanNotes, renameWikiLinks,
     searchRelevance,
     renderAll, renderNotes, renderBreadcrumbs, notesInPath, notesForPath, onSearch, resetNavigation, closeEditor, resetNotesRenderChunk,
+    virtualColumnsFor, virtualChunk, virtualOffsets, virtualRange, refreshVirtualLayout,
     loadMoreNotes, appendMoreNotes, loadAllNotesForEnd, noteCardHtml, notesCardsHtml, mergeImportedData, reloadFromStorage, textDiffPreview, dataDiffSummary,
     showHelp, recordRuntimeError, get runtimeErrors() { return runtimeErrors; },
     updateBulkBar, refreshBulkCards, clearBulkSelection, toggleBulkSelection, bulkSelectRange, bulkSelectedNotes, bulkSelectAll,
@@ -6634,6 +7231,7 @@ if (window) {
     removeOrphanTags, findSimilarTagNames, highlightSimilarTags,
     openPalette, closePalette, renderPalette, paletteKey, paletteCommands, dialogShow, dialogClose,
     loadSnapshots, saveSnapshots, maybeSnapshot, restoreSnapshot, snapshotMenu, checkFileConflict,
+    ensureSnapshotsLoaded, ensureTrashLoaded, markTabStale, requestTabConflict, readFreshState,
     loadTrash, saveTrash, moveToTrash, restoreFromTrash, emptyTrash, trashMenu,
     prepareUndo, undoLastAction, redoLastAction, clearUndoHistory,
     openFindBar, closeFindBar, mdFindNext, mdReplaceOne, mdReplaceAll, updateMdToc,
@@ -6648,12 +7246,18 @@ if (window) {
     get editorRating() { return editorRating; },
     get idbMode() { return idbMode; },
     get idbError() { return idbError; },
+    get snapshotsLoaded() { return snapshotsLoaded; },
+    get trashLoaded() { return trashLoaded; },
+    get dataRev() { return dataRev; },
+    get knownRev() { return knownRev; },
+    get staleData() { return staleData; },
     get currentPath() { return currentPath; },
     set currentPath(v) { currentPath = Array.isArray(v) ? v : []; },
     get searchScope() { return searchScope; },
     get searchQuery() { return searchQuery; },
     get notesTotalCount() { return notesTotalCount; },
     get notesRenderLimit() { return notesRenderLimit; },
+    get virtualActive() { return virtualActive; },
     get bulkSelected() { return [...bulkSelected]; },
     renderFacets, cycleFacet, toggleFacets, addView, deleteView, applyView, loadViews, saveViews, resetFacets,
     get collapsed() { return collapsed; },

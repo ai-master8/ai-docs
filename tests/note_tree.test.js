@@ -2125,3 +2125,193 @@ describe('Оптимизации и надёжность (P3)', () => {
     strictEqual(app.bulkSelected.length, 0);
   });
 });
+
+describe('Ленивая загрузка снимков и корзины', () => {
+  const HEAVY = 'noteTreeData_v1';
+  const SNAPS = 'noteTreeSnapshots';
+  const TRASH = 'noteTreeTrash';
+
+  test('storageInit не читает снимки и корзину, их поднимает ensure*Loaded', async () => {
+    const fake = makeFakeIdb({
+      [HEAVY]: JSON.stringify({ version: 2, tags: [], notes: [{ id: 'n1', title: 'A', tagIds: [] }] }),
+      [SNAPS]: JSON.stringify([{ ts: 1, sig: '1:old', count: 1, data: { tags: [], notes: [] } }]),
+      [TRASH]: JSON.stringify([{ deleted: 1, note: { id: 'x', title: 'Старая', tagIds: [] } }])
+    });
+    window.indexedDB = fake;
+    await app.storageInit();
+
+    strictEqual(app.snapshotsLoaded, false, 'снимки ещё не прочитаны');
+    strictEqual(app.trashLoaded, false, 'корзина ещё не прочитана');
+
+    const snaps = await app.ensureSnapshotsLoaded();
+    strictEqual(snaps.length, 1);
+    ok(app.snapshotsLoaded);
+    const trash = await app.ensureTrashLoaded();
+    strictEqual(trash.length, 1);
+    ok(app.trashLoaded);
+  });
+
+  test('снимок и удаление до загрузки не затирают старые данные', async () => {
+    const fake = makeFakeIdb({
+      [SNAPS]: JSON.stringify([{ ts: 1, sig: '1:old', count: 1, data: { tags: [], notes: [] } }]),
+      [TRASH]: JSON.stringify([{ deleted: 1, note: { id: 'old', title: 'Старая', tagIds: [] } }])
+    });
+    window.indexedDB = fake;
+    await app.storageInit();
+    seed([], [{ id: 'n1', title: 'Новая', tagIds: [] }]);
+
+    app.maybeSnapshot(true);
+    app.moveToTrash(app.state.notes[0]);
+    await app.idbIdle();
+
+    const snaps = JSON.parse(fake._data.get(SNAPS));
+    strictEqual(snaps.length, 2, 'старый снимок сохранён вместе с новым');
+    strictEqual(JSON.parse(fake._data.get(TRASH)).length, 2, 'корзина объединена');
+  });
+
+  test('при повреждённых данных восстановление ждёт ленивый снимок из базы', async () => {
+    const fake = makeFakeIdb({
+      [HEAVY]: 'null',
+      [SNAPS]: JSON.stringify([{
+        ts: 1, sig: '1:n5', count: 1,
+        data: { tags: [], notes: [{ id: 'n5', title: 'Из базы', tagIds: [] }] }
+      }])
+    });
+    window.indexedDB = fake;
+    await app.storageInit();
+    await app.loadState();
+
+    strictEqual(app.state.notes.length, 1);
+    strictEqual(app.state.notes[0].title, 'Из базы');
+    strictEqual(app.storageProbe().recovered, 'snapshot');
+  });
+});
+
+describe('Ревизии и конфликты вкладок', () => {
+  const HEAVY = 'noteTreeData_v1';
+
+  afterEach(() => {
+    const mask = document.getElementById('dialogMask');
+    if (mask && mask.classList.contains('show')) document.getElementById('dialogCancelBtn').click();
+  });
+
+  test('saveState увеличивает ревизию и пишет updatedAt', () => {
+    seed([], [{ id: 'n1', title: 'A', tagIds: [] }]);
+    app.saveState();
+    let d = JSON.parse(window.localStorage.getItem(HEAVY));
+    strictEqual(d.rev, 1);
+    ok(d.updatedAt > 0);
+    app.saveState();
+    d = JSON.parse(window.localStorage.getItem(HEAVY));
+    strictEqual(d.rev, 2);
+  });
+
+  test('loadState читает ревизию из конверта', async () => {
+    window.localStorage.setItem(HEAVY, JSON.stringify({
+      version: 2, rev: 7, updatedAt: 123,
+      tags: [], notes: [{ id: 'n1', title: 'A', tagIds: [] }]
+    }));
+    await app.loadState();
+    strictEqual(app.dataRev, 7);
+    strictEqual(app.staleData, false);
+  });
+
+  test('устаревшая копия не перезаписывает хранилище без выбора', async () => {
+    seed([], [{ id: 'n1', title: 'Локальная', tagIds: [] }]);
+    app.saveState();
+    const before = JSON.parse(window.localStorage.getItem(HEAVY));
+
+    app.markTabStale(50);
+    strictEqual(app.staleData, true);
+    strictEqual(app.saveState(), false, 'запись отложена до разрешения конфликта');
+    ok(document.getElementById('dialogMask').classList.contains('show'), 'показан диалог выбора');
+
+    document.getElementById('dialogThirdBtn').click(); // «Перезаписать»
+    await new Promise(r => setTimeout(r, 0));
+
+    const after = JSON.parse(window.localStorage.getItem(HEAVY));
+    strictEqual(after.rev, 51, 'ревизия выше известной чужой');
+    strictEqual(after.notes[0].title, 'Локальная');
+    strictEqual(app.staleData, false);
+  });
+
+  test('объединение при конфликте сохраняет заметки обеих вкладок', async () => {
+    seed([], [{ id: 'n1', title: 'Локальная', tagIds: [], updated: 10 }]);
+    app.saveState();
+
+    // Другая вкладка успела сохранить ревизию 2 со своей заметкой.
+    window.localStorage.setItem(HEAVY, JSON.stringify({
+      version: 2, rev: 2, updatedAt: Date.now(),
+      tags: [], notes: [
+        { id: 'n1', title: 'Локальная', tagIds: [], updated: 10 },
+        { id: 'n2', title: 'Из другой вкладки', tagIds: [], updated: 20 }
+      ]
+    }));
+    app.markTabStale(2);
+    app.saveState();
+    document.getElementById('dialogExtraBtn').click(); // «Объединить»
+    await new Promise(r => setTimeout(r, 20));
+
+    ok(app.state.notes.some(n => n.title === 'Из другой вкладки'), 'чужая заметка добавлена');
+    const stored = JSON.parse(window.localStorage.getItem(HEAVY));
+    ok(stored.notes.some(n => n.title === 'Из другой вкладки'), 'объединение записано');
+    strictEqual(stored.rev, 3);
+    strictEqual(app.staleData, false);
+  });
+});
+
+describe('Виртуализация списка заметок', () => {
+  test('колонки считаются по той же сетке, что и CSS', () => {
+    strictEqual(app.virtualColumnsFor(0, false), 1);
+    strictEqual(app.virtualColumnsFor(400, false), 1);
+    strictEqual(app.virtualColumnsFor(600, false), 2);
+    strictEqual(app.virtualColumnsFor(1000, false), 3);
+    strictEqual(app.virtualColumnsFor(1000, true), 1, 'в режиме просмотра — одна колонка');
+  });
+
+  test('virtualChunk раскладывает заметки по рядам', () => {
+    const list = [1, 2, 3, 4, 5];
+    deepEqual(app.virtualChunk(list, 2), [[1, 2], [3, 4], [5]]);
+    deepEqual(app.virtualChunk(list, 1).length, 5);
+  });
+
+  test('virtualRange находит видимое окно и учитывает запас', () => {
+    const heights = [200, 200, 200, 200, 200];
+    const { offsets, total } = app.virtualOffsets(heights);
+    strictEqual(total, 5 * (200 + 16), 'высота с промежутками');
+    deepEqual(app.virtualRange(5, offsets, 0, 216, 0), [0, 1]);
+    deepEqual(app.virtualRange(5, offsets, 0, 216, 1), [0, 2]);
+    deepEqual(app.virtualRange(5, offsets, 432, 216, 0), [2, 3]);
+    deepEqual(app.virtualRange(5, offsets, 0, 5000, 0), [0, 5], 'без прокрутки видно всё');
+  });
+
+  test('большой список рисуется окном и догружает ряды при прокрутке', async () => {
+    const notes = Array.from({ length: 600 }, (_, i) => ({
+      id: 'v' + i, title: 'Заметка ' + i, body: '', tagIds: [], updated: i
+    }));
+    seed([], notes);
+    const el = document.getElementById('notes');
+    Object.defineProperty(el, 'clientHeight', { configurable: true, value: 600 });
+    Object.defineProperty(el, 'clientWidth', { configurable: true, value: 1000 });
+    try {
+      app.renderNotes();
+      ok(app.virtualActive, 'включилась виртуализация');
+      const shown = document.querySelectorAll('#notes .note-card').length;
+      ok(shown > 0 && shown < 100, 'в DOM только окно, а не все 600 карточек (' + shown + ')');
+      ok(document.querySelector('#notes .virt-spacer'), 'есть распорка снизу/сверху');
+      const firstRow = document.querySelector('#notes .virt-row').dataset.vrow;
+
+      el.scrollTop = 216 * 80;
+      el.dispatchEvent(new window.Event('scroll'));
+      await new Promise(r => setTimeout(r, 40));
+
+      const newFirst = document.querySelector('#notes .virt-row').dataset.vrow;
+      ok(Number(newFirst) > Number(firstRow), 'при прокрутке окно сдвинулось');
+      ok(document.querySelectorAll('#notes .note-card').length < 100, 'карточек по-прежнему немного');
+    } finally {
+      delete el.clientHeight;
+      delete el.clientWidth;
+      app.resetNotesRenderChunk();
+    }
+  });
+});
