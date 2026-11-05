@@ -1844,3 +1844,164 @@ describe('Релевантность (P2)', () => {
     strictEqual(sorted[0].id, 'n1');
   });
 });
+
+describe('Автоподгрузка и объединение импорта (P1)', () => {
+  test('список подгружается порциями, loadMoreNotes добавляет остаток', () => {
+    const notes = [];
+    for (let i = 0; i < 250; i++) notes.push({ id: 'n' + i, title: 'Заметка ' + i, body: '', tagIds: [], updated: i });
+    seed([], notes);
+    app.renderAll();
+    strictEqual(app.notesTotalCount, 250);
+    strictEqual(app.notesRenderLimit, 200);
+    strictEqual(document.querySelectorAll('#notes .note-card').length, 200);
+    strictEqual(app.loadMoreNotes(), true);
+    strictEqual(document.querySelectorAll('#notes .note-card').length, 250);
+    strictEqual(app.loadMoreNotes(), false);
+  });
+
+  test('mergeImportedData обновляет только более новые версии и добавляет новые', () => {
+    seed([], [
+      { id: 'n1', title: 'Старая', body: 'a', tagIds: [], updated: 10 },
+      { id: 'n2', title: 'Не трогать', body: 'b', tagIds: [], updated: 100 }
+    ]);
+    const res = app.mergeImportedData({
+      tags: [],
+      notes: [
+        { id: 'n1', title: 'Новая', body: 'a2', tagIds: [], updated: 20 },
+        { id: 'n2', title: 'Устаревшая', body: 'b', tagIds: [], updated: 50 },
+        { id: 'n3', title: 'Добавлена', body: '', tagIds: [], updated: 30 }
+      ]
+    });
+    deepEqual(res, { added: 1, updated: 1, total: 3 });
+    strictEqual(app.noteById('n1').title, 'Новая');
+    strictEqual(app.noteById('n2').title, 'Не трогать');
+    ok(app.noteById('n3'), 'новая заметка добавлена');
+  });
+});
+
+describe('Массовые операции (P2)', () => {
+  test('выделение и массовое закрепление/удаление', async () => {
+    seed([], [
+      { id: 'n1', title: 'A', body: '', tagIds: [], updated: 1 },
+      { id: 'n2', title: 'B', body: '', tagIds: [], updated: 2 },
+      { id: 'n3', title: 'C', body: '', tagIds: [], updated: 3 }
+    ]);
+    app.renderAll();
+    app.toggleBulkSelection('n1');
+    app.toggleBulkSelection('n2');
+    deepEqual(app.bulkSelected.sort(), ['n1', 'n2']);
+    app.bulkTogglePin();
+    strictEqual(app.noteById('n1').pinned, true);
+    strictEqual(app.noteById('n2').pinned, true);
+    strictEqual(app.noteById('n3').pinned, undefined);
+    strictEqual(app.bulkSelected.length, 0, 'после операции выделение снято');
+
+    app.toggleBulkSelection('n1');
+    app.toggleBulkSelection('n2');
+    const p = app.bulkDelete();
+    document.getElementById('dialogOkBtn').click();
+    await p;
+    ok(!app.noteById('n1') && !app.noteById('n2'), 'выбранные заметки удалены');
+    ok(app.noteById('n3'), 'остальные на месте');
+  });
+
+  test('диапазон Shift-выделения идёт по порядку карточек', () => {
+    seed([], [
+      { id: 'n1', title: 'A', body: '', tagIds: [], updated: 3 },
+      { id: 'n2', title: 'B', body: '', tagIds: [], updated: 2 },
+      { id: 'n3', title: 'C', body: '', tagIds: [], updated: 1 }
+    ]);
+    app.renderAll();
+    app.toggleBulkSelection('n1');
+    app.bulkSelectRange('n3');
+    deepEqual(app.bulkSelected.sort(), ['n1', 'n2', 'n3']);
+  });
+});
+
+describe('Diff, поиск и черновики (P2)', () => {
+  test('textDiffPreview показывает «− было / + станет», dataDiffSummary считает изменения', () => {
+    const diff = app.textDiffPreview('строка 1\nстарое', 'строка 1\nновое');
+    ok(diff.includes('- старое'));
+    ok(diff.includes('+ новое'));
+    ok(!diff.includes('- строка 1'), 'общий префикс не дублируется');
+
+    seed([{ id: 't1', name: 'a' }], [
+      { id: 'n1', title: 'A', body: 'old', tagIds: ['t1'], updated: 1 },
+      { id: 'n2', title: 'B', body: '', tagIds: [], updated: 1 }
+    ]);
+    const summary = app.dataDiffSummary(app.state, {
+      tags: [{ id: 't1', name: 'a' }, { id: 't2', name: 'b' }],
+      notes: [
+        { id: 'n1', title: 'A2', body: 'new', tagIds: ['t1'], updated: 2 },
+        { id: 'n3', title: 'C', body: '', tagIds: [], updated: 2 }
+      ]
+    });
+    ok(summary.includes('＋ новых заметок: 1'));
+    ok(summary.includes('− удалится заметок: 1'));
+    ok(summary.includes('✎ изменится заметок: 1'));
+    ok(summary.includes('Новые тэги: b'));
+  });
+
+  test('created: фильтрует по дате создания, | даёт ИЛИ внутри токена', () => {
+    const jan = new Date(2024, 0, 15, 12).getTime();
+    const feb = new Date(2024, 1, 10, 12).getTime();
+    seed([], [
+      { id: 'n1', title: 'Кот', body: 'мур', tagIds: [], created: jan, updated: jan },
+      { id: 'n2', title: 'Пёс', body: 'гав', tagIds: [], created: feb, updated: feb },
+      { id: 'n3', title: 'Птица', body: 'кар', tagIds: [], created: feb, updated: feb }
+    ]);
+    app.onSearch('created:2024-01-15');
+    deepEqual(app.searchScopeNotes().map(n => n.id), ['n1']);
+    app.onSearch('created:>=2024-02-01');
+    deepEqual(app.searchScopeNotes().map(n => n.id).sort(), ['n2', 'n3']);
+    app.onSearch('кот|пёс');
+    deepEqual(app.searchScopeNotes().map(n => n.id).sort(), ['n1', 'n2']);
+  });
+
+  test('черновики хранятся по заметкам и старый одиночный формат читается', () => {
+    seed([], [
+      { id: 'n1', title: 'Первая', body: 'a', tagIds: [], updated: 1 },
+      { id: 'n2', title: 'Вторая', body: 'b', tagIds: [], updated: 1 }
+    ]);
+    app.openEditor('n1');
+    document.getElementById('fTitle').value = 'Черновик первой';
+    app.scheduleDraftSave();
+    app.flushDraftSave();
+    app.closeEditor({ silent: true });
+    app.openEditor('n2');
+    strictEqual(document.getElementById('fTitle').value, 'Вторая', 'чужой черновик не подставляется');
+    app.closeEditor({ silent: true });
+    app.openEditor('n1');
+    strictEqual(document.getElementById('fTitle').value, 'Черновик первой');
+    app.closeEditor({ silent: true });
+
+    // Старый формат: один черновик без обёртки drafts.
+    app.storageSet('noteTreeDraft', JSON.stringify({ noteId: 'n2', title: 'Старый', body: '', tags: [], rating: 0, ts: Date.now() }));
+    strictEqual(app.readStoredDraft('n2').title, 'Старый');
+  });
+});
+
+describe('Доступность дерева (P2)', () => {
+  test('строки дерева имеют role/treeitem, aria-level и aria-expanded', () => {
+    seed([{ id: 't1', name: 'a' }, { id: 't2', name: 'b' }], [
+      { id: 'n1', title: 'X', body: '', tagIds: ['t1', 't2'], updated: 1 }
+    ]);
+    app.renderAll();
+    const row = document.querySelector('#tree .node-row[data-path="a"]');
+    ok(row, 'строка папки отрисована');
+    strictEqual(row.getAttribute('role'), 'treeitem');
+    strictEqual(row.getAttribute('aria-level'), '1');
+    strictEqual(row.getAttribute('aria-expanded'), 'true');
+    strictEqual(row.getAttribute('aria-selected'), 'false');
+    row.click();
+    strictEqual(row.getAttribute('aria-expanded'), 'false', 'сворачивание обновляет aria-expanded');
+  });
+
+  test('активная папка помечается aria-selected', () => {
+    seed([{ id: 't1', name: 'a' }], [{ id: 'n1', title: 'X', body: '', tagIds: ['t1'], updated: 1 }]);
+    app.renderAll();
+    app.currentPath = ['a'];
+    app.applyTreeState();
+    strictEqual(document.querySelector('#tree .node-row[data-path="a"]').getAttribute('aria-selected'), 'true');
+  });
+});
