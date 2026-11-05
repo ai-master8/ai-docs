@@ -96,6 +96,8 @@ global.resetApp = () => {
   if (app.storageClearMemory) app.storageClearMemory();
   try { window.indexedDB = undefined; } catch (e) {}
   app.state.notes = app.applyData([]);
+  if (app.clearUndoHistory) app.clearUndoHistory();
+  if (app.resetNotesRenderChunk) app.resetNotesRenderChunk();
   // Сбрасываем навигацию, поиск и открытый просмотр заметки между тестами.
   app.resetNavigation();
   app.onSearch('');

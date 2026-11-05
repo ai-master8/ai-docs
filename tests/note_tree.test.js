@@ -838,6 +838,152 @@ describe('Задачи, фасеты и представления', () => {
   });
 });
 
+describe('Внутренние ссылки и обратные ссылки', () => {
+  test('renderMarkdown превращает [[Заголовок]] в безопасную ссылку', () => {
+    const html = app.renderMarkdown('См. [[Другая заметка]] и [[<b>x</b>]]');
+    const box = document.createElement('div');
+    box.innerHTML = html;
+    const links = box.querySelectorAll('a.wikilink');
+    strictEqual(links.length, 2);
+    strictEqual(links[0].dataset.wikilink, 'Другая заметка');
+    strictEqual(links[0].textContent, 'Другая заметка');
+    strictEqual(box.querySelector('b'), null, 'HTML внутри ссылки экранирован');
+    const codeBox = document.createElement('div');
+    codeBox.innerHTML = app.renderMarkdown('`[[Цель]]`');
+    strictEqual(codeBox.querySelectorAll('a.wikilink').length, 0, 'внутри кода ссылка не создаётся');
+    strictEqual(codeBox.querySelector('code').textContent, '[[Цель]]');
+  });
+
+  test('noteBacklinks находит ссылающиеся заметки без учёта регистра', () => {
+    seed([], [
+      { id: 'n1', title: 'Цель', tagIds: [] },
+      { id: 'n2', title: 'Ссылка', body: 'см. [[цель]]', tagIds: [] },
+      { id: 'n3', title: 'Другая', body: '[[Цель]] и [[Цель]]', tagIds: [] },
+      { id: 'n4', title: 'Без ссылки', body: 'просто текст', tagIds: [] }
+    ]);
+    const back = app.noteBacklinks(app.state.notes[0]);
+    deepEqual(back.map(n => n.id).sort(), ['n2', 'n3']);
+    deepEqual(app.wikiLinkTitles('[[A]] x [[B]]'), ['A', 'B']);
+  });
+
+  test('openWikiLink открывает заметку в её папке', () => {
+    seed([{ id: 't1', name: 'работа' }], [
+      { id: 'n1', title: 'Цель', tagIds: ['t1'] },
+      { id: 'n2', title: 'Ссылка', body: '[[Цель]]', tagIds: [] }
+    ]);
+    app.renderAll();
+    app.openWikiLink('Цель');
+    strictEqual(app.viewingId, 'n1');
+    deepEqual(app.currentPath, ['работа']);
+    strictEqual(app.searchQuery, '');
+  });
+
+  test('ссылка [[…]] кликабельна в просмотре и ведёт к заметке', () => {
+    seed([], [
+      { id: 'n1', title: 'Источник', body: 'Перейти: [[Цель]]', tagIds: [] },
+      { id: 'n2', title: 'Цель', body: 'текст', tagIds: [] }
+    ]);
+    app.renderAll();
+    app.openNoteView('n1');
+    const link = document.querySelector('#noteView .nv-body a.wikilink');
+    ok(link, 'ссылка отрендерена');
+    link.click();
+    strictEqual(app.viewingId, 'n2');
+  });
+
+  test('в просмотре показаны обратные ссылки', () => {
+    seed([], [
+      { id: 'n1', title: 'Цель', tagIds: [] },
+      { id: 'n2', title: 'Источник', body: '[[Цель]]', tagIds: [] }
+    ]);
+    app.renderAll();
+    app.openNoteView('n1');
+    const items = document.querySelectorAll('#noteView .nv-backlink');
+    strictEqual(items.length, 1);
+    strictEqual(items[0].textContent, 'Источник');
+    items[0].click();
+    strictEqual(app.viewingId, 'n2');
+  });
+});
+
+describe('Многоуровневая отмена и повтор', () => {
+  test('undo откатывает несколько действий подряд, redo возвращает их', () => {
+    seed([], [
+      { id: 'n1', title: 'Первая', tagIds: [] },
+      { id: 'n2', title: 'Вторая', tagIds: [] },
+      { id: 'n3', title: 'Третья', tagIds: [] }
+    ]);
+    app.prepareUndo('удаление 1');
+    app.state.notes = app.state.notes.filter(n => n.id !== 'n1');
+    app.prepareUndo('удаление 2');
+    app.state.notes = app.state.notes.filter(n => n.id !== 'n2');
+    strictEqual(app.state.notes.length, 1);
+
+    app.undoLastAction();
+    deepEqual(app.state.notes.map(n => n.id).sort(), ['n2', 'n3']);
+    app.undoLastAction();
+    deepEqual(app.state.notes.map(n => n.id).sort(), ['n1', 'n2', 'n3']);
+    strictEqual(app.undoLastAction(), false, 'стек пуст');
+
+    app.redoLastAction();
+    deepEqual(app.state.notes.map(n => n.id).sort(), ['n2', 'n3']);
+    app.redoLastAction();
+    deepEqual(app.state.notes.map(n => n.id).sort(), ['n3']);
+    strictEqual(app.redoLastAction(), false, 'повторять больше нечего');
+  });
+
+  test('новое действие очищает стек повтора', () => {
+    seed([], [{ id: 'n1', title: 'Одна', tagIds: [] }]);
+    app.prepareUndo('удаление');
+    app.state.notes = [];
+    app.undoLastAction();
+    app.prepareUndo('новое');
+    app.state.notes = [];
+    strictEqual(app.redoLastAction(), false, 'redo очищен новым действием');
+  });
+
+  test('clearUndoHistory очищает оба стека', () => {
+    seed([], [{ id: 'n1', title: 'Одна', tagIds: [] }]);
+    app.prepareUndo('удаление');
+    app.state.notes = [];
+    app.undoLastAction();
+    app.clearUndoHistory();
+    strictEqual(app.undoLastAction(), false);
+    strictEqual(app.redoLastAction(), false);
+  });
+});
+
+describe('Порционная отрисовка больших списков', () => {
+  test('сначала рисуются 200 карточек, остальные — по кнопке', () => {
+    const notes = Array.from({ length: 450 }, (_, i) => ({
+      id: 'n' + i, title: 'Заметка ' + i, tagIds: [], updated: 1000 + i
+    }));
+    seed([], notes);
+    app.renderAll();
+    strictEqual(document.querySelectorAll('#notes .note-card').length, 200);
+    const btn = document.getElementById('notesMoreBtn');
+    ok(btn, 'кнопка «Показать ещё» есть');
+    ok(btn.textContent.indexOf('200 из 250') !== -1, 'кнопка показывает остаток');
+    btn.click();
+    strictEqual(document.querySelectorAll('#notes .note-card').length, 400);
+    document.getElementById('notesMoreBtn').click();
+    strictEqual(document.querySelectorAll('#notes .note-card').length, 450);
+    strictEqual(document.getElementById('notesMoreBtn'), null, 'кнопка исчезла');
+  });
+
+  test('смена поиска начинает порцию заново', () => {
+    const notes = Array.from({ length: 450 }, (_, i) => ({
+      id: 'n' + i, title: 'Заметка ' + i, body: 'общий текст', tagIds: [], updated: 1000 + i
+    }));
+    seed([], notes);
+    app.renderAll();
+    document.getElementById('notesMoreBtn').click();
+    strictEqual(document.querySelectorAll('#notes .note-card').length, 400);
+    app.onSearch('общий');
+    strictEqual(document.querySelectorAll('#notes .note-card').length, 200);
+  });
+});
+
 describe('Сортировка, экспорт и снимки', () => {
   test('сортировка по оценке: высокие выше, без оценки — в конце', () => {
     const notes = [
