@@ -2597,3 +2597,30 @@ describe('Доступность и тема', () => {
     strictEqual(document.activeElement.dataset.noteId, 'n2');
   });
 });
+
+describe('Авто-тема и системная настройка', () => {
+  test('авто-тема следует prefers-color-scheme и реагирует на смену', () => {
+    const oldMatchMedia = window.matchMedia;
+    let dark = true;
+    const listeners = [];
+    window.matchMedia = () => ({
+      get matches() { return dark; },
+      media: '(prefers-color-scheme: dark)',
+      addEventListener: (ev, fn) => { if (ev === 'change') listeners.push(fn); },
+      removeEventListener: () => {}
+    });
+    try {
+      app.state.theme = 'auto';
+      app.applyTheme();
+      strictEqual(document.documentElement.getAttribute('data-theme'), 'dark');
+      strictEqual(document.getElementById('themeBtn').textContent, '🌗');
+      dark = false;
+      listeners.forEach(fn => fn({ matches: false }));
+      strictEqual(document.documentElement.getAttribute('data-theme'), 'light', 'смена системной темы применяется сразу');
+    } finally {
+      window.matchMedia = oldMatchMedia;
+      app.state.theme = 'light';
+      app.applyTheme();
+    }
+  });
+});

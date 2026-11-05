@@ -5627,9 +5627,19 @@ function toggleTheme() {
   notify('🎨 Тема: ' + (state.theme === 'auto' ? 'авто (по системе)'
     : state.theme === 'dark' ? 'тёмная' : 'светлая'));
 }
-// Системная тема — нужна для режима «авто».
+// Системная тема — нужна для режима «авто». Создаём объект matchMedia лениво,
+// но до первого вычисления темы, иначе первый переход в «авто» остался бы со
+// старым значением до следующего события.
 let themeMedia = null;
+function initThemeMedia() {
+  if (themeMedia || typeof window.matchMedia !== 'function') return;
+  themeMedia = window.matchMedia('(prefers-color-scheme: dark)');
+  const onChange = () => { if (state.theme === 'auto') applyTheme(); };
+  if (themeMedia.addEventListener) themeMedia.addEventListener('change', onChange);
+  else if (themeMedia.addListener) themeMedia.addListener(onChange);
+}
 function systemPrefersDark() {
+  initThemeMedia();
   return !!(themeMedia && themeMedia.matches);
 }
 // Фактическая тема: при «авто» берём системную, иначе сохранённый выбор.
@@ -5647,14 +5657,6 @@ function applyTheme() {
     btn.textContent = state.theme === 'auto' ? '🌗' : (eff === 'dark' ? '☀️' : '🌙');
     btn.title = 'Тема: ' + label + '. Нажмите, чтобы сменить';
     btn.setAttribute('aria-label', 'Тема: ' + label + '. Переключить');
-  }
-  // Один раз подписываемся на смену системной темы: в режиме «авто» интерфейс
-  // должен перекрашиваться без перезагрузки страницы.
-  if (!themeMedia && typeof window.matchMedia === 'function') {
-    themeMedia = window.matchMedia('(prefers-color-scheme: dark)');
-    const onChange = () => { if (state.theme === 'auto') applyTheme(); };
-    if (themeMedia.addEventListener) themeMedia.addEventListener('change', onChange);
-    else if (themeMedia.addListener) themeMedia.addListener(onChange);
   }
 }
 
