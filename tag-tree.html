@@ -1637,8 +1637,10 @@ function requestTabConflict() {
     if (choice === 'extra') {
       const remote = await readFreshState();
       if (remote) {
-        const res = mergeImportedData(remote);
-        notify('🔗 Объединено: +' + res.added + ', обновлено ' + res.updated + ' · всего ' + res.total);
+        const res = mergeImportedData(remote, { preserveConflicts: true });
+        notify('🔗 Объединено: +' + res.added + ', обновлено ' + res.updated
+          + (res.conflicts ? ', конфликтных копий ' + res.conflicts : '')
+          + ' · всего ' + res.total);
       } else {
         notify('⚠️ Не удалось прочитать данные другой вкладки — сохранена локальная версия');
       }
@@ -2436,6 +2438,7 @@ function paletteCommands() {
     { label: '🕘 Версии данных', hint: '', run: () => snapshotMenu() },
     { label: '📸 Сделать снимок сейчас', hint: '', run: () => makeSnapshotNow() },
     { label: '🗑 Корзина заметок', hint: '', run: () => trashMenu() },
+    { label: '📝 Несохранённые черновики', hint: '', run: () => draftMenu() },
     { label: '↩ Отменить последнее действие', hint: 'Ctrl+Z', run: () => undoLastAction() },
     { label: '↪ Повторить отменённое действие', hint: 'Ctrl+Shift+Z', run: () => redoLastAction() },
     { label: '❓ Справка по клавишам', hint: '?', run: () => showHelp() },
@@ -4410,6 +4413,76 @@ function readStoredDraft(noteId) {
   const d = store.drafts[draftKeyFor(noteId === undefined ? (editingId || null) : noteId)];
   return d && typeof d === 'object' ? d : null;
 }
+// ---------- Менеджер черновиков ----------
+// Черновики пишутся автоматически, но раньше их можно было увидеть только
+// открыв саму заметку. Здесь — список всех несохранённых текстов: заголовок,
+// тип (новая/правка/удалённая) и возраст; открыть и очистить всё.
+function draftEntries() {
+  const store = readDraftStore();
+  return Object.keys(store.drafts)
+    .map(key => ({ key, draft: store.drafts[key] }))
+    .filter(x => x.draft && typeof x.draft === 'object')
+    .sort((a, b) => Number(b.draft.ts || 0) - Number(a.draft.ts || 0));
+}
+function draftLabel(key, d) {
+  const title = String(d.title || '').trim();
+  const note = key !== '__new__' ? noteById(key) : null;
+  const name = (title || (note && note.title) || UNTITLED).slice(0, 30);
+  const kind = key === '__new__' ? 'новая' : (note ? 'правка' : 'удалённая');
+  return '📝 ' + name + ' · ' + kind + ' · ' + humanDate(d.ts || Date.now());
+}
+// Применить черновик к уже открытому редактору. editorSnapshot не трогаем —
+// индикатор «не сохранено» должен остаться, иначе черновик выглядел бы сохранённым.
+function applyDraftToEditor(d) {
+  if (typeof d.title === 'string') document.getElementById('fTitle').value = d.title;
+  if (typeof d.body === 'string') document.getElementById('fBody').value = d.body;
+  currentTags = Array.isArray(d.tags) ? d.tags.filter(t => typeof t === 'string') : [];
+  editorRating = clampRating(d.rating);
+  renderRatingInput();
+  renderTagBadges();
+  renderTagHints();
+  hideTagSuggest();
+  updateMdWordCount(document.getElementById('fBody').value);
+  updateEditorDirtyMark();
+}
+// Открыть черновик: для существующей заметки — её редактор, для новой или
+// удалённой — пустой редактор (сохранение создаст заметку заново).
+function openDraft(key) {
+  const d = readDraftStore().drafts[key];
+  if (!d || typeof d !== 'object') { notify('⚠️ Черновик не найден'); return; }
+  const apply = () => {
+    const exists = key !== '__new__' && noteById(key);
+    if (editorOpen) closeEditor({ silent: true });
+    openEditor(exists ? key : null);
+    applyDraftToEditor(d);
+    notify('📝 Черновик открыт');
+  };
+  if (guardUnsavedEditor('В заметке есть несохранённые изменения. Открыть черновик?', apply)) return;
+  apply();
+}
+async function clearAllDrafts() {
+  const n = draftEntries().length;
+  if (!n) { notify('Черновиков нет'); return; }
+  const ok = await dialogConfirm('Удалить все черновики (' + n + ')? Несохранённые тексты будут потеряны.');
+  if (!ok) return;
+  cancelDraftSave();
+  try { storageSet(DRAFT_KEY, ''); } catch (e) { /* ignore */ }
+  notify('🧹 Черновики удалены');
+}
+function draftMenu(anchor) {
+  const list = draftEntries();
+  const items = [];
+  if (!list.length) {
+    items.push({ label: 'Черновиков нет', run: () => {} });
+  } else {
+    list.forEach(x => items.push({ label: draftLabel(x.key, x.draft), run: () => openDraft(x.key) }));
+    items.push('-');
+    items.push({ label: '🧹 Удалить все черновики', run: clearAllDrafts, danger: true });
+  }
+  const el = anchor && anchor.getBoundingClientRect ? anchor : document.getElementById('backupBtn');
+  const rect = el.getBoundingClientRect();
+  showCtxMenu(rect.left, rect.bottom + 4, items);
+}
 // Показать рейтинг в редакторе: закрашенные звёзды и aria-состояние кнопок.
 function renderRatingInput() {
   const box = document.getElementById('fRating');
@@ -5289,14 +5362,27 @@ function byteLength(str) {
 }
 // Проверить, не изменился ли привязанный файл извне с момента последней записи.
 // Возвращает true, если обнаружен конфликт (файл изменён другим процессом).
+let fileConflictBusy = false;
+let fileConflictSkip = ''; // версия файла, для которой уже спрашивали и отказались
 async function checkFileConflict() {
-  if (!fileHandle) return false;
+  if (!fileHandle || fileConflictBusy) return false;
   try {
     const file = await fileHandle.getFile();
+    const stamp = file.size + ':' + file.lastModified;
+    // Уже спрашивали про эту версию и пользователь выбрал «оставить мои данные» —
+    // не показываем один и тот же диалог повторно на каждый focus.
+    if (stamp === fileConflictSkip) return false;
     // Файл обновлён позже нашей записи и размер отличается — вероятно, изменён извне.
     if (lastFileWriteTs && file.lastModified > lastFileWriteTs + 1000 && file.size !== lastWrittenSize) {
-      const ok = await dialogConfirm('Файл данных был изменён вне приложения. Перечитать его (заменит текущие данные)? Ваш вариант можно восстановить через «🕘 Версии данных».');
+      fileConflictBusy = true;
+      let ok = false;
+      try {
+        ok = await dialogConfirm('Файл данных был изменён вне приложения. Перечитать его (заменит текущие данные)? Ваш вариант можно восстановить через «🕘 Версии данных».');
+      } finally {
+        fileConflictBusy = false;
+      }
       if (ok) { await readFromFile(); return false; }
+      fileConflictSkip = stamp;
       return true;
     }
   } catch (e) { /* файл недоступен — игнорируем */ }
@@ -5548,6 +5634,7 @@ async function snapshotMenu() {
   items.push({ label: '📸 Сделать снимок сейчас', run: () => makeSnapshotNow() });
   if (idbMode && !trashLoaded) await ensureTrashLoaded();
   items.push({ label: '🗑 Корзина (' + loadTrash().length + ')', run: () => trashMenu() });
+  items.push({ label: '📝 Черновики (' + draftEntries().length + ')', run: () => draftMenu() });
   items.push({ label: '♻️ Резервная копия (файл/браузер)', run: () => restoreFromBackup() });
   const btn = document.getElementById('backupBtn');
   const rect = btn.getBoundingClientRect();
@@ -6290,8 +6377,13 @@ document.addEventListener('contextmenu', (e) => {
   if (!e.target.closest('.node-row') && !e.target.closest('.note-card') && !e.target.closest('.root-note')) closeCtxMenu();
 });
 // Обнаружение внешних изменений привязанного файла при возврате к окну.
+// Слушаем и visibilitychange, и focus: файл могли изменить в другом редакторе,
+// не переключая вкладку (тогда visibilitychange не сработает).
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden && fileHandle) checkFileConflict();
+});
+window.addEventListener('focus', () => {
+  if (fileHandle && !document.hidden) checkFileConflict();
 });
 
 // Снять привязку файла (убрать сохранённый дескриптор).
@@ -6354,18 +6446,52 @@ async function restoreFileHandle() {
 // Объединить импорт с текущими данными: заметки с тем же id заменяются только
 // если импортированная версия новее, остальные добавляются. Тэги нормализуются
 // и дедуплицируются через applyData. Возвращает { added, updated, total }.
-function mergeImportedData(data) {
+// Совпадает ли содержимое заметок, кроме служебных дат/идентификатора.
+// Нужно, чтобы не плодить «конфликтные копии» там, где версии идентичны.
+function sameNoteContent(a, b) {
+  if (!a || !b) return false;
+  return (a.title || '') === (b.title || '')
+    && (a.body || '') === (b.body || '')
+    && (a.tagIds || []).slice().sort().join('\u0001') === (b.tagIds || []).slice().sort().join('\u0001')
+    && (Number(a.rating) || 0) === (Number(b.rating) || 0)
+    && !!a.pinned === !!b.pinned;
+}
+// Копия проигравшей версии при слиянии: новый id, заметная подпись и свежая
+// дата, чтобы её было видно в списке. Так текст не теряется ни в одной вкладке.
+function makeConflictCopy(n) {
+  const copy = normalizeNote({
+    ...n,
+    id: uid(),
+    title: ((n.title || UNTITLED) + ' (конфликтная копия)').slice(0, 200),
+    pinned: false,
+    created: Date.now(),
+    updated: Date.now()
+  });
+  return copy;
+}
+// Слияние по id. С preserveConflicts (разрешение конфликта вкладок) проигравшая
+// версия не выбрасывается, а сохраняется отдельной заметкой. Обычный импорт
+// работает как раньше: побеждает более новый updated.
+function mergeImportedData(data, opts) {
+  const preserve = !!(opts && opts.preserveConflicts);
   const oldNotes = state.notes.slice();
   const incoming = applyData(data);
   const byId = new Map(oldNotes.map(n => [n.id, n]));
   let added = 0, updated = 0;
+  const conflicts = [];
   incoming.forEach(n => {
     const ex = byId.get(n.id);
-    if (!ex) { byId.set(n.id, n); added++; }
-    else if ((n.updated || 0) > (ex.updated || 0)) { byId.set(n.id, n); updated++; }
+    if (!ex) { byId.set(n.id, n); added++; return; }
+    const newer = (n.updated || 0) > (ex.updated || 0);
+    if (preserve && !sameNoteContent(ex, n)) conflicts.push(newer ? ex : n);
+    if (newer) { byId.set(n.id, n); updated++; }
   });
+  // Конфликтные копии добавляем после основного прохода, чтобы их id не
+  // участвовали в сопоставлении.
+  conflicts.forEach(loser => { const copy = makeConflictCopy(loser); byId.set(copy.id, copy); });
   state.notes = [...byId.values()];
-  return { added, updated, total: state.notes.length };
+  invalidateTree();
+  return { added, updated, conflicts: conflicts.length, total: state.notes.length };
 }
 function exportData() {
   const payload = JSON.stringify(serializeData(), null, 2);
@@ -7224,6 +7350,7 @@ if (window) {
     storageGet, storageSet, storageInit, storageClearMemory, flushIdbWrites, idbIdle, fmtSize, serializeData,
     HEAVY_KEYS, DRAFT_KEY, DRAFT_BYTES_LIMIT,
     flushDeferredSettings, flushStateSave, clearStoredDraft, scheduleDraftSave, flushDraftSave, readStoredDraft, readDraftStore, writeDraftStore,
+    draftMenu, draftEntries, openDraft, clearAllDrafts, applyDraftToEditor,
     parseStoredState, relieveQuota, withTimeout, loadState, saveState,
     mergeTags, openTagManager, closeTagManager, renderTagManager, tagManagerRename, tagManagerMerge, tagManagerDelete, tagManagerColor,
     updateTagSuggest, hideTagSuggest, applyTagSuggest,
