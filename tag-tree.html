@@ -579,7 +579,7 @@
   <aside class="sidebar" id="sidebar">
     <div class="search">
       <div class="search-box">
-        <input id="search" type="text" placeholder="Поиск: слова, #тэг, rating:>=4… (/)" title="Быстрый фокус: /. Фильтры: #тэг, -тэг, title:, rating:>=4, since:/until:" aria-label="Поиск по заметкам">
+        <input id="search" type="text" placeholder="Поиск: слова, #тэг, rating:>=4… (/)" title="Быстрый фокус: /. Фильтры: #тэг, -тэг, title:, rating:>=4, task:open, links:orphan, since:/until:" aria-label="Поиск по заметкам">
         <button type="button" class="search-clear" id="searchClear" title="Очистить поиск (Esc)" aria-label="Очистить поиск" hidden>✕</button>
       </div>
       <div class="search-scope" id="searchScope" role="group" aria-label="Область поиска">
@@ -718,9 +718,9 @@
 
 <!-- Менеджер тэгов: список всех тэгов с действиями -->
 <div class="modal-mask" id="tagManagerMask">
-  <div class="modal" role="dialog" aria-modal="true">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="tmTitle">
     <div class="modal-head">
-      <h2>🏷️ Менеджер тэгов</h2>
+      <h2 id="tmTitle">🏷️ Менеджер тэгов</h2>
       <button class="icon" id="tmCloseBtn" title="Закрыть">✕</button>
     </div>
     <div class="modal-body">
@@ -744,7 +744,7 @@
 
 <!-- Командная палитра / быстрый переход (Ctrl+K) -->
 <div class="modal-mask" id="paletteMask">
-  <div class="modal narrow palette-modal" role="dialog" aria-modal="true">
+  <div class="modal narrow palette-modal" role="dialog" aria-modal="true" aria-label="Быстрый переход">
     <div class="modal-body" style="padding:12px">
       <input id="paletteInput" class="tm-search" type="text" placeholder="Папка, заметка или команда… (Ctrl+K)" autocomplete="off">
       <div class="palette-list" id="paletteList"></div>
@@ -791,6 +791,7 @@ const SNAPSHOT_MAX = 5;
 const TRASH_KEY = 'noteTreeTrash';
 const TRASH_MAX = 20;
 const VIEW_KEY = 'noteTreeLastView';
+const DRAFT_KEY = 'noteTreeDraft';
 const UNTITLED = 'Без названия';
 const NO_NOTES_MSG = '⚠️ Нет заметок для экспорта';
 const LOCALE = 'ru';
@@ -802,6 +803,7 @@ const SORT_MODES = [
   { id: 'updated', label: 'Сначала обновлённые' },
   { id: 'created', label: 'Сначала новые' },
   { id: 'rating', label: 'По оценке' },
+  { id: 'relevance', label: 'По релевантности' },
   { id: 'title', label: 'По алфавиту' }
 ];
 
@@ -814,6 +816,7 @@ let viewingId = null;       // id заметки, показанной цели�
 let currentTags = [];       // тэги в редакторе
 let editorRating = 0;       // рейтинг в редакторе (0–5, 0 — без оценки)
 let editorSnapshot = '';    // снимок состояния редактора (для отслеживания изменений)
+let draftTimer = null;      // отложенная запись черновика редактора
 let searchQuery = '';
 let searchScope = 'all';   // all | folder — где искать при непустом запросе
 let collapsed = new Set();  // свёрнутые ключи веток "t1/t2"
@@ -1128,11 +1131,14 @@ function storageClearMemory() {
   idbRetryPending = 0;
   snapshotCache = null;
   trashCache = null;
+  snapshotSigCache = { ref: null, length: -1, sig: '' };
   lastViewJSON = null;
   lastCollapsedJSON = null;
   lastRecovery = '';
   quotaRelieved = false;
   cancelDeferredSettings();
+  cancelDeferredStateSave();
+  cancelDraftSave();
   if (idbDB) { try { idbDB.close(); } catch (e) {} }
   idbDB = null;
   idbMode = false;
@@ -1176,8 +1182,18 @@ function tagName(id) { return tagById[id] != null ? tagById[id] : ''; }
 function getTagByName(name) { return state.tags.find(x => x.name === name) || null; }
 // Регистронезависимое сравнение имён тэгов.
 function sameName(a, b) { return String(a).toLowerCase() === String(b).toLowerCase(); }
-// Заметка по id (или null).
-function noteById(id) { return state.notes.find(x => x.id === id) || null; }
+// Заметка по id (или null). Индекс по Map пересобирается только при смене
+// массива заметок или его длины — поиск в списке на каждый вызов больше не нужен.
+let noteIndexCache = { ref: null, length: -1, map: null };
+function noteById(id) {
+  const notes = state.notes;
+  let c = noteIndexCache;
+  if (c.ref !== notes || c.length !== notes.length) {
+    c = noteIndexCache = { ref: notes, length: notes.length, map: new Map() };
+    notes.forEach(n => { if (n && n.id && !c.map.has(n.id)) c.map.set(n.id, n); });
+  }
+  return c.map.get(id) || null;
+}
 // Все внутренние ссылки [[Заголовок]] в тексте (в порядке появления, с повторами).
 function wikiLinkTitles(body) {
   const out = [];
@@ -1195,13 +1211,79 @@ function noteByTitle(title) {
   if (!t) return null;
   return state.notes.find(n => String(n.title || '').trim().toLowerCase() === t) || null;
 }
+// Индекс обратных ссылок: заголовок в нижнем регистре -> заметки, где он
+// упомянут в [[...]]. Строится один раз на версию данных (сброс в invalidateTree).
+let backlinkIndexCache = null;
+function backlinkIndex() {
+  if (backlinkIndexCache) return backlinkIndexCache;
+  const map = new Map();
+  state.notes.forEach(n => {
+    wikiLinkTitles(n.body).forEach(title => {
+      const key = title.toLowerCase();
+      let arr = map.get(key);
+      if (!arr) { arr = []; map.set(key, arr); }
+      if (!arr.includes(n)) arr.push(n);
+    });
+  });
+  backlinkIndexCache = map;
+  return map;
+}
 // Заметки, которые ссылаются на данную через [[Заголовок]].
 function noteBacklinks(note) {
   if (!note) return [];
   const title = String(note.title || '').trim().toLowerCase();
   if (!title) return [];
-  return state.notes.filter(n => n.id !== note.id
-    && wikiLinkTitles(n.body).some(t => t.toLowerCase() === title));
+  return (backlinkIndex().get(title) || []).filter(n => n.id !== note.id);
+}
+// Обновить [[старый заголовок]] на [[новый]] во всех заметках. Возвращает
+// число изменённых заметок. skipId — заметка, чья история уже сохранена
+// вызывающим (редактор), чтобы не делать второй снимок.
+function renameWikiLinks(oldTitle, newTitle, skipId) {
+  const oldKey = String(oldTitle || '').trim().toLowerCase();
+  const clean = String(newTitle || '').trim();
+  if (!oldKey || !clean || oldKey === clean.toLowerCase()) return 0;
+  const re = /\[\[([^\]\n]+)\]\]/g;
+  let changed = 0;
+  state.notes.forEach(n => {
+    if (!n || !n.body) return;
+    let hit = false;
+    const next = String(n.body).replace(re, (m, t) => {
+      if (String(t).trim().toLowerCase() !== oldKey) return m;
+      hit = true;
+      return '[[' + clean + ']]';
+    });
+    if (!hit) return;
+    if (n.id !== skipId) {
+      pushHistory(n);
+      n.body = next;
+      n.updated = Date.now();
+    } else {
+      n.body = next;
+    }
+    changed++;
+  });
+  return changed;
+}
+// Статистика задач Markdown в заметке: открытые/выполненные чекбоксы.
+function taskStats(n) {
+  const re = /^[ \t]*[-*+][ \t]+\[([ xX])\][ \t]/gm;
+  const body = String(n && n.body || '');
+  let open = 0, done = 0, m;
+  while ((m = re.exec(body)) !== null) {
+    if (m[1].toLowerCase() === 'x') done++; else open++;
+  }
+  return { open, done, total: open + done };
+}
+// Заметки без входящих и исходящих [[ссылок]].
+function orphanNotes() {
+  const incoming = backlinkIndex();
+  return state.notes.filter(n => {
+    if (wikiLinkTitles(n.body).length > 0) return false;
+    const title = String(n.title || '').trim().toLowerCase();
+    if (!title) return true;
+    const refs = incoming.get(title) || [];
+    return !refs.some(x => x.id !== n.id);
+  });
 }
 // Цвет тэга по имени (или '' если не задан).
 function tagColor(name) {
@@ -1272,6 +1354,35 @@ function isEmptyNote(n) { return n.title === '' && n.body === '' && n.tagIds.len
 function isValidData(data) {
   if (Array.isArray(data)) return true;
   return !!(data && typeof data === 'object' && Array.isArray(data.notes));
+}
+// Верхние пределы импорта: защищают от случайного/вредоносного файла.
+const IMPORT_MAX_NOTES = 50000;
+const IMPORT_MAX_BYTES = 50 * 1024 * 1024;
+// Строгая проверка структуры импорта (сверх isValidData): типы полей заметок
+// и таблицы тэгов. Возвращает { ok, count } или { ok:false, reason }.
+function validateImport(data) {
+  if (!isValidData(data)) return { ok: false, reason: 'bad format' };
+  const notes = Array.isArray(data) ? data : data.notes;
+  if (notes.length > IMPORT_MAX_NOTES) return { ok: false, reason: 'too many notes' };
+  for (let i = 0; i < notes.length; i++) {
+    const n = notes[i];
+    if (!n || typeof n !== 'object' || Array.isArray(n)) return { ok: false, reason: 'bad note ' + i };
+    if (n.title != null && typeof n.title !== 'string') return { ok: false, reason: 'bad title ' + i };
+    if (n.body != null && typeof n.body !== 'string') return { ok: false, reason: 'bad body ' + i };
+    if (n.rating != null && typeof n.rating !== 'number' && typeof n.rating !== 'string') return { ok: false, reason: 'bad rating ' + i };
+    if (n.tagIds != null && !Array.isArray(n.tagIds)) return { ok: false, reason: 'bad tagIds ' + i };
+    if (n.tags != null && !Array.isArray(n.tags)) return { ok: false, reason: 'bad tags ' + i };
+    if (n.history != null && !Array.isArray(n.history)) return { ok: false, reason: 'bad history ' + i };
+  }
+  if (!Array.isArray(data) && data.tags != null) {
+    if (!Array.isArray(data.tags)) return { ok: false, reason: 'bad tags table' };
+    for (const t of data.tags) {
+      if (!t || typeof t !== 'object' || Array.isArray(t)) return { ok: false, reason: 'bad tag entry' };
+      if (t.name != null && typeof t.name !== 'string') return { ok: false, reason: 'bad tag name' };
+      if (t.id != null && typeof t.id !== 'string') return { ok: false, reason: 'bad tag id' };
+    }
+  }
+  return { ok: true, count: notes.length };
 }
 
 // Применить загруженный объект данных (version 2: { tags, notes } | version 1: [{...}]).
@@ -1382,8 +1493,38 @@ function loadState() {
 }
 // Сохранить и заметки, и таблицу тэгов (версия 2).
 function saveState() {
+  cancelDeferredStateSave();
   storageSet(LS_KEY, JSON.stringify({ version: 2, tags: state.tags, notes: state.notes }));
   maybeSnapshot(); // снимок при изменении состава заметок (остальные вызовы — no-op)
+}
+// Отложенная запись частых действий (оценка, задачи): при серии кликов
+// сериализуем архив один раз, а не на каждое нажатие. Как и настройки,
+// очередь обязана сбрасываться на pagehide/visibilitychange.
+const STATE_SAVE_DEBOUNCE = 300;
+let deferredStateTimer = null;
+let deferredFileSave = false;
+function cancelDeferredStateSave() {
+  if (deferredStateTimer) { clearTimeout(deferredStateTimer); deferredStateTimer = null; }
+  deferredFileSave = false;
+}
+function deferStateSave() {
+  if (deferredStateTimer) clearTimeout(deferredStateTimer);
+  deferredStateTimer = setTimeout(() => {
+    deferredStateTimer = null;
+    const writeFile = deferredFileSave;
+    deferredFileSave = false;
+    saveState();
+    if (writeFile) saveToFile();
+  }, STATE_SAVE_DEBOUNCE);
+}
+function flushStateSave() {
+  if (!deferredStateTimer) return;
+  clearTimeout(deferredStateTimer);
+  deferredStateTimer = null;
+  const writeFile = deferredFileSave;
+  deferredFileSave = false;
+  saveState();
+  if (writeFile) saveToFile();
 }
 function saveTheme() { storageSet(THEME_KEY, state.theme); }
 // Последнее записанное значение свёрнутости (чтобы не писать одно и то же).
@@ -1419,11 +1560,22 @@ function saveSnapshots(list) {
   snapshotCache = trimmed;
   storageSet(SNAPSHOT_KEY, JSON.stringify(trimmed));
 }
+// Сигнатура состава заметок (count:ids) для maybeSnapshot. Пересчитываем
+// только когда меняется сам массив или его длина: правка текста не должна
+// сортировать все id на каждое сохранение.
+let snapshotSigCache = { ref: null, length: -1, sig: '' };
+function notesSignature() {
+  const notes = state.notes;
+  if (snapshotSigCache.ref === notes && snapshotSigCache.length === notes.length) return snapshotSigCache.sig;
+  const sig = notes.length + ':' + notes.map(n => n.id).sort().join(',');
+  snapshotSigCache = { ref: notes, length: notes.length, sig };
+  return sig;
+}
 // Сделать снимок текущего состояния, если состав заметок изменился с прошлого снимка.
 function maybeSnapshot(force) {
   if (state.notes.length === 0) return false;
   const list = loadSnapshots(); // из кэша: без JSON.parse
-  const signature = state.notes.length + ':' + state.notes.map(n => n.id).sort().join(',');
+  const signature = notesSignature();
   const lastSig = list.length ? list[0].sig : null;
   if (!force && signature === lastSig) return false;
   const snapshot = {
@@ -1530,20 +1682,46 @@ function trashMenu() {
 
 // ---------- Отмена опасных действий (Ctrl+Z, многоуровневая) ----------
 const UNDO_MAX = 20;
+// Ограничение памяти на историю: 20 полных копий большого архива могут занять
+// сотни мегабайт. Сверху держим ~24 МБ суммарно, вытесняя самые старые шаги.
+const UNDO_MEMORY_LIMIT = 24 * 1024 * 1024;
 let undoStack = [];
 let redoStack = [];
+// Грубая оценка размера снимка (UTF-16 + накладные расходы объектов).
+function estimateUndoSize(u) {
+  let bytes = 128;
+  u.notes.forEach(n => {
+    bytes += 160 + (n.title || '').length * 2 + (n.body || '').length * 2 + (n.tagIds || []).length * 16;
+    (n.history || []).forEach(h => {
+      bytes += 96 + (h.title || '').length * 2 + (h.body || '').length * 2;
+    });
+  });
+  u.tags.forEach(t => { bytes += 96 + (t.name || '').length * 2; });
+  return bytes;
+}
 // Снимок текущего состояния для стека отмены/повтора.
 function captureUndoState(label) {
-  return {
+  const snapshot = {
     label,
     tags: state.tags.map(t => ({ ...t })),
     notes: state.notes.map(n => ({ ...n, tagIds: (n.tagIds || []).slice(), history: (n.history || []).map(h => ({ ...h })) }))
   };
+  snapshot.size = estimateUndoSize(snapshot);
+  return snapshot;
+}
+function stackBytes(stack) {
+  return stack.reduce((sum, item) => sum + (item.size || 0), 0);
+}
+// Положить снимок в стек с ограничением по числу шагов и по памяти.
+function pushBounded(stack, item) {
+  stack.push(item);
+  while (stack.length > 1 && (stack.length > UNDO_MAX || stackBytes(stack) > UNDO_MEMORY_LIMIT)) {
+    stack.shift();
+  }
 }
 // Запомнить состояние ПЕРЕД опасным действием (вызывать первым).
 function prepareUndo(label) {
-  undoStack.push(captureUndoState(label));
-  if (undoStack.length > UNDO_MAX) undoStack.shift();
+  pushBounded(undoStack, captureUndoState(label));
   redoStack = [];
 }
 // Полностью очистить историю отмены/повтора (новая загрузка данных, тесты).
@@ -1563,8 +1741,7 @@ function restoreUndoState(u) {
 function undoLastAction() {
   if (!undoStack.length) { notify('🕘 Нечего отменять'); return false; }
   const u = undoStack.pop();
-  redoStack.push(captureUndoState(u.label));
-  if (redoStack.length > UNDO_MAX) redoStack.shift();
+  pushBounded(redoStack, captureUndoState(u.label));
   restoreUndoState(u);
   notify('↩ Отменено: ' + u.label);
   return true;
@@ -1573,8 +1750,7 @@ function undoLastAction() {
 function redoLastAction() {
   if (!redoStack.length) { notify('🕘 Нечего повторять'); return false; }
   const u = redoStack.pop();
-  undoStack.push(captureUndoState(u.label));
-  if (undoStack.length > UNDO_MAX) undoStack.shift();
+  pushBounded(undoStack, captureUndoState(u.label));
   restoreUndoState(u);
   notify('↪ Повторено: ' + u.label);
   return true;
@@ -1661,14 +1837,37 @@ let treeCache = null;
 // сворачивать/разворачивать и обновлять цвета, не пересобирая всё дерево.
 let treeRows = new Map();
 let treeDirty = true;
+// Активная ветка и флаг «изменились свёрнутость/цвета»: при обычной навигации
+// applyTreeState обновляет только активную строку, а не все treeRows.
+let activeTreeKey = '';
+let treeStateDirty = false;
 // Кэш имён тэгов заметки в нижнем регистре (поиск, фасеты): меньше аллокаций.
 let tagsLowerCache = new Map();
-// Инвалидация при изменении данных: сбрасываем дерево, счётчики и кэш имён.
+// Кэш поискового текста (заголовок + тело в нижнем регистре) по id заметки.
+// Раньше каждый запрос заново приводил тело к нижнему регистру для каждой заметки.
+let searchTextCache = new Map();
+function searchHaystack(n) {
+  let v = searchTextCache.get(n.id);
+  if (v == null) {
+    v = ((n.title || '') + '\n' + (n.body || '')).toLowerCase();
+    searchTextCache.set(n.id, v);
+  }
+  return v;
+}
+// Инвалидация при изменении данных: сбрасываем дерево, счётчики и кэши.
 function invalidateTree() {
   treeCache = null;
   tagCountsCache = null;
   tagsLowerCache = new Map();
+  searchTextCache = new Map();
+  backlinkIndexCache = null;
+  noteIndexCache = { ref: null, length: -1, map: null };
   treeDirty = true;
+}
+// Точечно сбросить кэши текста/ссылок заметки, не перестраивая дерево.
+function invalidateNoteCaches(n) {
+  if (n) searchTextCache.delete(n.id);
+  backlinkIndexCache = null;
 }
 // Имена тэгов заметки в нижнем регистре. Кэш сбрасывается в invalidateTree().
 function tagsLowerOf(n) {
@@ -1704,6 +1903,8 @@ function renderTree() {
   if (!treeDirty && el.dataset.built === '1') { applyTreeState(); return; }
   el.innerHTML = '';
   treeRows.clear();
+  activeTreeKey = '';
+  treeStateDirty = false;
   const root = buildTree();
   // корневые заметки (без тэгов)
   state.notes.filter(n => root.ids.has(n.id)).forEach(n => {
@@ -1764,9 +1965,13 @@ function buildChildren(rec) {
   return div;
 }
 
-// Обновить одну строку: активность, шеврон, цвет иконки, видимость детей.
+// Обновить одну строку: активность плюс визуальное состояние.
 function updateRowState(rec) {
   rec.row.classList.toggle('active', isPathActive(rec.path));
+  updateRowVisual(rec);
+}
+// Шеврон, видимость детей и цвет иконки (без активности).
+function updateRowVisual(rec) {
   const chevText = rec.hasChildren ? (collapsed.has(rec.key) ? '▸' : '▾') : '';
   if (rec.chev.textContent !== chevText) rec.chev.textContent = chevText;
   if (rec.childrenDiv) {
@@ -1787,7 +1992,20 @@ function updateRowState(rec) {
 
 // Синхронизировать состояние дерева с моделью, не пересобирая DOM.
 function applyTreeState() {
-  treeRows.forEach(updateRowState);
+  const key = currentPath.join('/');
+  if (activeTreeKey && activeTreeKey !== key) {
+    const prev = treeRows.get(activeTreeKey);
+    if (prev) prev.row.classList.remove('active');
+  }
+  const cur = treeRows.get(key);
+  if (cur) cur.row.classList.add('active');
+  activeTreeKey = key;
+  // Свёрнутость/цвета меняются только действиями над деревом — тогда обходим
+  // все строки. Обычные переходы и поиск ограничиваются одной активной строкой.
+  if (treeStateDirty) {
+    treeRows.forEach(updateRowVisual);
+    treeStateDirty = false;
+  }
   document.querySelectorAll('#tree .root-note').forEach(el => {
     el.classList.toggle('active', el.dataset.noteId === selectedId);
   });
@@ -1806,6 +2024,7 @@ function toggleFolder(rec) {
     } else {
       collapsed.add(rec.key);
     }
+    treeStateDirty = true;
     saveCollapsed();
   }
   goToPath(rec.path);
@@ -1880,6 +2099,8 @@ function paletteCommands() {
     { label: '↩ Отменить последнее действие', hint: 'Ctrl+Z', run: () => undoLastAction() },
     { label: '↪ Повторить отменённое действие', hint: 'Ctrl+Shift+Z', run: () => redoLastAction() },
     { label: 'ℹ️ Диагностика хранилища', hint: '', run: () => showDiagnostics() },
+    { label: '✅ Открытые задачи', hint: 'task:open', run: () => onSearch('task:open') },
+    { label: '🔗 Заметки без ссылок', hint: 'links:orphan', run: () => onSearch('links:orphan') },
     { label: '⤵ Развернуть дерево', hint: '', run: () => expandAllTree() },
     { label: '⤴ Свернуть дерево', hint: '', run: () => collapseAllTree() },
     { label: '🏠 Все без тэга', hint: '', run: () => { currentPath = []; renderAll(); } }
@@ -2124,7 +2345,7 @@ function parseLocalDate(str) {
   return isNaN(d.getTime()) ? null : d.getTime();
 }
 function parseQuery(q) {
-  const parts = { text: [], title: [], includeTags: [], excludeTags: [], rating: [], pinned: null, since: null, until: null };
+  const parts = { text: [], title: [], includeTags: [], excludeTags: [], rating: [], pinned: null, since: null, until: null, task: null, links: null };
   // «since: 2024-01-01» (пробел после двоеточия) нормализуем в один токен.
   const normalized = String(q == null ? '' : q).replace(/\b(since|until):\s+/gi, '$1:');
   tokenizeQuery(normalized).forEach(tok => {
@@ -2148,6 +2369,23 @@ function parseQuery(q) {
       const v = tok.slice(7).toLowerCase();
       if (/^(true|1|yes|да)$/.test(v)) parts.pinned = true;
       else if (/^(false|0|no|нет)$/.test(v)) parts.pinned = false;
+      else parts.text.push(tok);
+    }
+    else if (/^task:/i.test(tok)) {
+      // task:open — есть незавершённые задачи, task:done — завершённые.
+      const v = tok.slice(5).toLowerCase();
+      if (/^(open|todo|unchecked|нет)$/.test(v)) parts.task = 'open';
+      else if (/^(done|completed|checked|выполнено)$/.test(v)) parts.task = 'done';
+      else if (/^(any|all|любые)$/.test(v)) parts.task = 'any';
+      else parts.text.push(tok);
+    }
+    else if (/^links:/i.test(tok)) {
+      // links:orphan — без входящих и исходящих, links:in — есть входящие.
+      const v = tok.slice(6).toLowerCase();
+      if (/^(orphan|none|без)$/.test(v)) parts.links = 'orphan';
+      else if (/^(in|backlink|входящие)$/.test(v)) parts.links = 'in';
+      else if (/^(out|wiki|исходящие)$/.test(v)) parts.links = 'out';
+      else if (/^(linked|any|есть)$/.test(v)) parts.links = 'linked';
       else parts.text.push(tok);
     }
     else if (/^since:/i.test(tok)) {
@@ -2192,7 +2430,7 @@ function matchesSearch(n) {
   // Свободный текст: каждый токен должен найтись (логика «И») в заголовке,
   // теле или тэгах заметки. Пустой набор — без ограничения.
   if (q.text.length > 0) {
-    const hay = ((n.title || '') + '\n' + (n.body || '')).toLowerCase();
+    const hay = searchHaystack(n);
     const tagsHay = noteTags;
     for (const tok of q.text) {
       const t = tok.toLowerCase();
@@ -2217,6 +2455,22 @@ function matchesSearch(n) {
   }
   // Закреплённые: pinned:true / pinned:false.
   if (q.pinned != null && !!n.pinned !== q.pinned) return false;
+  // Задачи Markdown: task:open / task:done / task:any.
+  if (q.task) {
+    const st = taskStats(n);
+    if (q.task === 'open' && st.open === 0) return false;
+    if (q.task === 'done' && st.done === 0) return false;
+    if (q.task === 'any' && st.total === 0) return false;
+  }
+  // Внутренние ссылки: links:orphan / in / out / linked.
+  if (q.links) {
+    const hasOut = wikiLinkTitles(n.body).length > 0;
+    const hasIn = noteBacklinks(n).length > 0;
+    if (q.links === 'orphan' && (hasOut || hasIn)) return false;
+    if (q.links === 'in' && !hasIn) return false;
+    if (q.links === 'out' && !hasOut) return false;
+    if (q.links === 'linked' && !hasIn && !hasOut) return false;
+  }
   // Фильтр по дате обновления: since:YYYY-MM-DD / until:YYYY-MM-DD
   const up = n.updated || n.created || 0;
   if (q.since != null && up < q.since) return false;
@@ -2417,6 +2671,35 @@ function highlightElement(root, query) {
   });
 }
 
+// Оценка релевантности заметки для текущего поиска: совпадения в заголовке
+// весят больше, дальше — число вхождений в тексте и точные имена тэгов.
+function searchRelevance(n) {
+  if (!searchQuery) return 0;
+  const q = getParsedQuery();
+  const terms = queryTerms(searchQuery);
+  const title = String(n.title || '').toLowerCase();
+  const hay = searchHaystack(n);
+  const noteTags = tagsLowerOf(n);
+  let score = 0;
+  terms.forEach(t => {
+    if (!t) return;
+    if (title === t) score += 120;
+    else if (title.startsWith(t)) score += 60;
+    else if (title.includes(t)) score += 30;
+    let from = 0, count = 0;
+    while ((from = hay.indexOf(t, from)) !== -1) {
+      count++;
+      from += t.length;
+      if (count >= 20) break;
+    }
+    if (count) score += Math.min(count, 10) * 6;
+    if (noteTags.some(name => name === t)) score += 40;
+    else if (noteTags.some(name => name.includes(t))) score += 12;
+  });
+  q.title.forEach(t => { if (title.includes(t)) score += 20; });
+  score += q.includeTags.length * 15;
+  return score;
+}
 // Сортировка списка заметок по режиму (по умолчанию — текущий sortMode).
 function sortNotes(notes, mode) {
   const m = mode || sortMode;
@@ -2424,6 +2707,11 @@ function sortNotes(notes, mode) {
   if (m === 'title') copy.sort((a, b) => (a.title || '').localeCompare(b.title || '', LOCALE));
   else if (m === 'created') copy.sort((a, b) => (b.created || 0) - (a.created || 0));
   else if (m === 'rating') copy.sort((a, b) => clampRating(b.rating) - clampRating(a.rating) || (b.updated || 0) - (a.updated || 0));
+  else if (m === 'relevance') {
+    const scores = new Map();
+    copy.forEach(n => scores.set(n.id, searchRelevance(n)));
+    copy.sort((a, b) => (scores.get(b.id) || 0) - (scores.get(a.id) || 0) || (b.updated || 0) - (a.updated || 0));
+  }
   else copy.sort((a, b) => (b.updated || 0) - (a.updated || 0));
   return copy;
 }
@@ -2493,14 +2781,28 @@ function safeCssColor(c) {
   return '';
 }
 // Короткое превью для карточки: таблицы выкидываем (в 96px они нечитаемы),
-// лишние пустые строки схлопываем, длину ограничиваем.
-function previewText(body) {
+// лишние пустые строки схлопываем, длину ограничиваем. В результатах поиска
+// сдвигаем окно к первому совпадению, чтобы найденное не осталось за кадром.
+function previewText(body, query) {
   const cleaned = (body || '')
     .split('\n')
     .filter(line => !/^\s*\|.*\|\s*$/.test(line))
     .join('\n')
     .replace(/\n{3,}/g, '\n\n');
   const limit = 140;
+  if (query) {
+    const lower = cleaned.toLowerCase();
+    let first = -1;
+    for (const term of queryTerms(query)) {
+      const i = lower.indexOf(term);
+      if (i !== -1 && (first === -1 || i < first)) first = i;
+    }
+    if (first > 60) {
+      const start = Math.max(0, first - 40);
+      const snip = cleaned.slice(start, start + limit);
+      return '…' + snip + (start + limit < cleaned.length ? '…' : '');
+    }
+  }
   return cleaned.length > limit ? cleaned.slice(0, limit) + '…' : cleaned;
 }
 // Порционная отрисовка больших списков: сразу строим не больше NOTES_CHUNK
@@ -2570,7 +2872,7 @@ function renderNotes() {
   // Карточки собираем одной строкой HTML (один парс вместо тысяч appendChild).
   // Весь пользовательский текст — через escapeHtml, превью — через renderMarkdown.
   const parts = visible.map(n => {
-    const preview = previewText(n.body);
+    const preview = previewText(n.body, searchQuery);
     const dt = humanDate(n.updated || n.created);
     const pathTags = pathTagsOf(n);
     const pathText = pathTags.length ? pathTags.join(' / ') : 'Без тэга';
@@ -2973,8 +3275,9 @@ function toggleNoteTask(noteId, index) {
   pushHistory(n);
   n.body = next;
   n.updated = Date.now();
-  saveState();
-  saveToFile();
+  invalidateNoteCaches(n);
+  deferStateSave();
+  deferredFileSave = true;
   renderNoteView();
   // Обновляем превью карточки, но сохраняем прокрутку списка.
   const notesEl = document.getElementById('notes');
@@ -3035,13 +3338,26 @@ function openEditorPanel(id) {
   document.getElementById('fBody').value = n ? n.body : '';
   document.getElementById('btnDelete').style.display = n ? 'inline-block' : 'none';
   document.getElementById('fTags').value = ''; // не тащим недописанный тэг из прошлого раза
+  // Снимок сохранённой версии — до возможного восстановления черновика, чтобы
+  // индикатор «не сохранено» корректно показал разницу.
+  const savedSnapshot = editorStateString();
+  const draft = readStoredDraft();
+  const draftTarget = n ? id : null;
+  if (draft && draft.noteId === draftTarget && Number(draft.ts) > (n ? (n.updated || 0) : 0)) {
+    if (typeof draft.title === 'string') document.getElementById('fTitle').value = draft.title;
+    if (typeof draft.body === 'string') document.getElementById('fBody').value = draft.body;
+    currentTags = Array.isArray(draft.tags) ? draft.tags.filter(t => typeof t === 'string') : [];
+    editorRating = clampRating(draft.rating);
+    renderRatingInput();
+    notify('↩ Восстановлен несохранённый черновик');
+  }
   closeFindBar();
   renderTagBadges();
   renderTagHints();
   hideTagSuggest();
   setMdMode('edit'); // всегда открываем в режиме редактирования
   updateMdWordCount(document.getElementById('fBody').value);
-  editorSnapshot = editorStateString();
+  editorSnapshot = savedSnapshot;
   updateEditorDirtyMark();
   if (split) split.classList.add('has-editor');
   const scroller = document.querySelector('#editorView .ne-scroll');
@@ -3061,6 +3377,57 @@ function editorStateString() {
     String(editorRating),
     currentTags.slice().sort().join('\u0001')
   ].join('\u0002');
+}
+// ---------- Черновик редактора ----------
+// Автосохранение несохранённых правок в localStorage: после перезагрузки или
+// падения вкладки текст можно восстановить. Черновик один; при сохранении,
+// удалении и подтверждённом отказе от правок он стирается.
+const DRAFT_DEBOUNCE = 500;
+function cancelDraftSave() {
+  if (draftTimer) { clearTimeout(draftTimer); draftTimer = null; }
+}
+function clearStoredDraft() {
+  cancelDraftSave();
+  try { storageSet(DRAFT_KEY, ''); } catch (e) { /* ignore */ }
+}
+function currentDraft() {
+  return {
+    noteId: editingId || null,
+    title: document.getElementById('fTitle').value,
+    body: document.getElementById('fBody').value,
+    tags: currentTags.slice(),
+    rating: editorRating,
+    ts: Date.now()
+  };
+}
+function saveDraftNow() {
+  draftTimer = null;
+  if (!editorOpen) return;
+  const draft = currentDraft();
+  // Пустой или уже сохранённый редактор черновик не создаёт.
+  if (!editorDirty() || (!draft.title.trim() && !draft.body.trim() && draft.tags.length === 0)) {
+    clearStoredDraft();
+    return;
+  }
+  try { storageSet(DRAFT_KEY, JSON.stringify(draft)); } catch (e) { /* ignore */ }
+}
+function scheduleDraftSave() {
+  if (!editorOpen) return;
+  if (draftTimer) clearTimeout(draftTimer);
+  draftTimer = setTimeout(saveDraftNow, DRAFT_DEBOUNCE);
+}
+function flushDraftSave() {
+  if (!draftTimer) return;
+  clearTimeout(draftTimer);
+  saveDraftNow();
+}
+function readStoredDraft() {
+  try {
+    const raw = storageGet(DRAFT_KEY);
+    if (!raw) return null;
+    const d = JSON.parse(raw);
+    return d && typeof d === 'object' ? d : null;
+  } catch (e) { return null; }
 }
 // Показать рейтинг в редакторе: закрашенные звёзды и aria-состояние кнопок.
 function renderRatingInput() {
@@ -3084,7 +3451,7 @@ function editorDirty() {
 function guardUnsavedEditor(message, action) {
   if (!editorOpen || !editorDirty()) return false;
   dialogConfirm(message).then(ok => {
-    if (ok) { closeEditor({ silent: true }); action(); }
+    if (ok) { clearStoredDraft(); closeEditor({ silent: true }); action(); }
   });
   return true;
 }
@@ -3118,7 +3485,7 @@ function requestCloseEditor() {
   if (!editorOpen) return;
   if (editorDirty()) {
     dialogConfirm('В заметке есть несохранённые изменения. Закрыть без сохранения?')
-      .then(ok => { if (ok) closeEditor(); });
+      .then(ok => { if (ok) { clearStoredDraft(); closeEditor(); } });
     return;
   }
   closeEditor();
@@ -3156,8 +3523,9 @@ function addTag(t) {
   if (!t) return;
   if (currentTags.some(x => x.toLowerCase() === t.toLowerCase())) return;
   currentTags.push(t);
+  scheduleDraftSave();
 }
-function removeTag(index) { currentTags.splice(index, 1); renderTagBadges(); renderTagHints(); }
+function removeTag(index) { currentTags.splice(index, 1); renderTagBadges(); renderTagHints(); scheduleDraftSave(); }
 function renderTagBadges() {
   const el = document.getElementById('tagBadges');
   el.innerHTML = '';
@@ -3458,15 +3826,18 @@ function saveNote() {
   rebuildTagIndex();
   invalidateTree();
   let savedId = editingId;
+  let linksUpdated = 0;
   if (editingId) {
     const n = noteById(editingId);
     if (n) {
+      const oldTitle = n.title;
       // Снимок предыдущей версии — только если текст реально изменился.
       if (n.title !== title || n.body !== body) pushHistory(n);
       // Оценка не считается «обновлением» содержимого — как и на карточке,
       // она не меняет дату и порядок в режиме «Сначала обновлённые».
       const contentChanged = n.title !== title || n.body !== body || JSON.stringify(n.tagIds || []) !== JSON.stringify(ids);
       n.title = title; n.body = body; n.tagIds = ids; n.rating = editorRating;
+      if (oldTitle !== title) linksUpdated = renameWikiLinks(oldTitle, title, n.id);
       if (contentChanged) n.updated = Date.now();
     }
   } else {
@@ -3479,9 +3850,10 @@ function saveNote() {
   selectedId = savedId || null;
   saveState();
   saveToFile();
+  clearStoredDraft();
   closeEditor({ silent: true });
   renderAll();
-  notify('✅ Заметка сохранена');
+  notify('✅ Заметка сохранена' + (linksUpdated ? ' · 🔗 обновлено ссылок: ' + linksUpdated : ''));
 }
 // Просит подтверждение и удаляет заметку. id можно передать из контекстного меню
 // или клавиатуры; без него удаляется заметка, открытая в редакторе.
@@ -3496,6 +3868,7 @@ async function deleteNote(id) {
   state.notes = state.notes.filter(x => x.id !== targetId);
   if (editingId === targetId) {
     editingId = null;
+    clearStoredDraft();
     closeEditor({ silent: true });
   }
   if (viewingId === targetId) viewingId = null;
@@ -4249,6 +4622,7 @@ function setTagColor(name, color) {
   if (!t) return;
   if (color) t.color = color; else delete t.color;
   rebuildTagIndex(); // обновить карту цветов (дерево перекрашивается без пересборки)
+  treeStateDirty = true; // цвета меняются — обновить все строки в applyTreeState
   saveState();
   saveToFile();
   renderAll();
@@ -4300,6 +4674,7 @@ function openTagManager() {
   const n = document.getElementById('tmNotice');
   if (n) { n.style.display = 'none'; n.textContent = ''; }
   renderTagManager();
+  if (s) setTimeout(() => s.focus(), 30);
 }
 function closeTagManager() {
   document.getElementById('tagManagerMask').classList.remove('show');
@@ -4758,8 +5133,8 @@ function setNoteRating(noteId, value, toggle) {
     renderRatingInput();
     updateEditorDirtyMark();
   }
-  saveState();
-  saveToFile();
+  deferStateSave();
+  deferredFileSave = true;
   if (sortMode === 'rating') {
     renderNotes();
     // Пересборка списка теряет фокус — возвращаем его на ту же карточку,
@@ -4888,13 +5263,25 @@ function importData() {
   fi.addEventListener('change', () => {
     const file = fi.files[0];
     if (!file) return;
+    if (file.size > IMPORT_MAX_BYTES) {
+      notify('⚠️ Файл слишком большой для импорта (больше 50 МБ)');
+      fi.value = '';
+      return;
+    }
     const reader = new FileReader();
     reader.onerror = () => { notify('⚠️ Не удалось прочитать файл'); fi.value = ''; };
     reader.onload = async e => {
       try {
         const data = JSON.parse(e.target.result);
-        if (!isValidData(data)) throw new Error('bad format');
-        const count = Array.isArray(data) ? data.length : (data.notes ? data.notes.length : 0);
+        const check = validateImport(data);
+        if (!check.ok) {
+          notify(check.reason === 'too many notes'
+            ? '⚠️ Слишком много заметок в файле (больше ' + IMPORT_MAX_NOTES + ')'
+            : '⚠️ Файл повреждён или имеет неверный формат');
+          fi.value = '';
+          return;
+        }
+        const count = check.count;
         const ok = await dialogConfirm(`Импортировать ${count} записей? Это заменит текущие данные.`);
         if (!ok) { fi.value = ''; return; }
         state.notes = applyData(data); // применяет таблицу тэгов и миграцию
@@ -4972,7 +5359,27 @@ function dialogPrompt(label, value) {
 // Подключение кнопок диалога выполняется в attachEvents.
 
 // ---------- Shortcut ----------
+// Удержать Tab внутри верхней открытой модалки (доступность).
+function trapModalFocus(e) {
+  if (e.key !== 'Tab') return;
+  const masks = [...document.querySelectorAll('.modal-mask.show')];
+  const mask = masks[masks.length - 1];
+  if (!mask) return;
+  const sel = 'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
+  const items = [...mask.querySelectorAll(sel)].filter(el => !el.hidden && el.offsetParent !== null);
+  if (!items.length) return;
+  const first = items[0];
+  const last = items[items.length - 1];
+  const active = document.activeElement;
+  if (e.shiftKey) {
+    if (active === first || !mask.contains(active)) { e.preventDefault(); last.focus(); }
+  } else if (active === last || !mask.contains(active)) {
+    e.preventDefault();
+    first.focus();
+  }
+}
 document.addEventListener('keydown', e => {
+  trapModalFocus(e);
   // Ctrl/Cmd+K — единый быстрый переход: папки/тэги, заметки, команды.
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault();
@@ -5088,7 +5495,7 @@ function attachEvents() {
 }
 // Дописать отложенные записи настроек и IndexedDB перед закрытием/скрытием вкладки.
 function attachLifecycleEvents() {
-  const flushPending = () => { flushDeferredSettings(); flushIdbWrites(); };
+  const flushPending = () => { flushDeferredSettings(); flushStateSave(); flushDraftSave(); flushIdbWrites(); };
   window.addEventListener('pagehide', flushPending);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden') flushPending();
@@ -5291,10 +5698,11 @@ function attachEditorEvents($) {
     editorRating = editorRating === v ? 0 : v; // повторный клик сбрасывает оценку
     renderRatingInput();
     updateEditorDirtyMark();
+    scheduleDraftSave();
   });
-  $('fTitle').addEventListener('input', updateEditorDirtyMark);
+  $('fTitle').addEventListener('input', () => { updateEditorDirtyMark(); scheduleDraftSave(); });
   $('fTags').addEventListener('keydown', tagInputKey);
-  $('fTags').addEventListener('input', () => { updateTagSuggest(); updateEditorDirtyMark(); });
+  $('fTags').addEventListener('input', () => { updateTagSuggest(); updateEditorDirtyMark(); scheduleDraftSave(); });
   $('fTags').addEventListener('focus', updateTagSuggest);
 }
 // Менеджер тэгов: список, поиск, уборка пустых и похожие имена.
@@ -5325,6 +5733,7 @@ function attachMarkdownEvents($) {
   $('fBody').addEventListener('input', () => {
     updateMdWordCount(document.getElementById('fBody').value); // счётчик — сразу
     updateEditorDirtyMark();
+    scheduleDraftSave();
     if (mdMode === 'preview' || mdMode === 'split') scheduleMdPreview();
   });
   $('fBody').addEventListener('scroll', syncMdScroll);
@@ -5362,6 +5771,29 @@ function requestPersistentStorage() {
     if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
   } catch (e) { /* нет API — не критично */ }
 }
+// Предупредить о второй открытой вкладке: синхронная запись из двух вкладок
+// может затереть изменения друг друга. Только предупреждение, без блокировки.
+const TAB_ID = 'tab-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 8);
+let tabChannel = null;
+let otherTabWarned = false;
+function initTabSync() {
+  if (typeof BroadcastChannel === 'undefined') return;
+  try {
+    tabChannel = new BroadcastChannel('tag-tree-tabs');
+    if (tabChannel.unref) tabChannel.unref(); // Node/jsdom: не держать процесс
+    tabChannel.onmessage = (e) => {
+      const d = e.data;
+      if (!d || d.id === TAB_ID) return;
+      if (d.type === 'hello') {
+        try { tabChannel.postMessage({ type: 'here', id: TAB_ID }); } catch (err) {}
+      } else if (d.type === 'here' && !otherTabWarned) {
+        otherTabWarned = true;
+        notify('⚠️ TagTree уже открыт в другой вкладке — изменения могут перезаписать друг друга. Работайте в одной или сделайте экспорт.');
+      }
+    };
+    tabChannel.postMessage({ type: 'hello', id: TAB_ID });
+  } catch (e) { tabChannel = null; }
+}
 // Обычный старт после подготовки хранилища.
 function startApp() {
   loadState();
@@ -5370,6 +5802,7 @@ function startApp() {
   renderAll();
   renderViews();
   requestPersistentStorage();
+  initTabSync();
   restoreFileHandle(); // восстановить привязку файла (асинхронно, если была)
 }
 try {
@@ -5392,8 +5825,9 @@ if (window) {
   window.__app = {
     state, tagsOf, pathTagsOf, noteBelongsToPath, buildTree,
     applyData, ensureTag, tagName, pruneTagIds, renameTag, deleteTag, invalidateTree,
-    isValidData, normalizeNote, renderMarkdown, highlightElement, parseLocalDate, byteLength,
-    clampRating, starsHtml, ratingText,
+    isValidData, validateImport, normalizeNote, renderMarkdown, highlightElement, parseLocalDate, byteLength,
+    clampRating, starsHtml, ratingText, taskStats, orphanNotes, renameWikiLinks,
+    searchRelevance,
     renderAll, renderNotes, renderBreadcrumbs, notesInPath, onSearch, resetNavigation, closeEditor, resetNotesRenderChunk,
     sortNotes, tagCount, tagColor, setTagColor, moveNoteToTag, pushHistory, restoreHistory,
     setSortMode, sortMenu, printNotes, parseQuery, tokenizeQuery, tagToken, matchesSearch, matchesSearchScoped, fuzzyMatch,
@@ -5402,8 +5836,8 @@ if (window) {
     updateSearchSuggest, applySearchSuggest, getParsedQuery, tagCounts, notesInFolder, submenuFor,
     closeSidebar, toggleSidebar, storageProbe, showDiagnostics, restoreFromBackup,
     storageGet, storageSet, storageInit, storageClearMemory, flushIdbWrites, idbIdle, fmtSize,
-    flushDeferredSettings, parseStoredState, relieveQuota, withTimeout,
-    loadState, saveState,
+    flushDeferredSettings, flushStateSave, clearStoredDraft, scheduleDraftSave, flushDraftSave, readStoredDraft,
+    parseStoredState, relieveQuota, withTimeout, loadState, saveState,
     mergeTags, openTagManager, closeTagManager, renderTagManager, tagManagerRename, tagManagerMerge, tagManagerDelete, tagManagerColor,
     updateTagSuggest, hideTagSuggest, applyTagSuggest,
     togglePin, expandAllTree, collapseAllTree, initTreeCollapse, notesKeyNav, treeKeyNav, editorDirty, requestCloseEditor,
@@ -5415,7 +5849,7 @@ if (window) {
     openFindBar, closeFindBar, mdFindNext, mdReplaceOne, mdReplaceAll, updateMdToc,
     humanDate, duplicateNote, exportFound, exportMdText, exportTxtText, rateNoteFromCard, setNoteRating, makeSnapshotNow, toggleTaskLine, toggleNoteTask, ratingFacetToken, toggleRatingFacet, saveLastView, restoreLastView,
     openEditor, saveNote, deleteNote,
-    openNoteView, closeNoteView, renderNoteView, goToPath, openWikiLink, noteByTitle, noteBacklinks, wikiLinkTitles,
+    openNoteView, closeNoteView, renderNoteView, goToPath, openWikiLink, noteByTitle, noteBacklinks, wikiLinkTitles, noteById,
     tagsLowerOf, applyTreeState, safeCssColor, scheduleMdPreview, cancelMdPreview,
     get selectedId() { return selectedId; },
     get viewingId() { return viewingId; },

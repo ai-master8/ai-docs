@@ -1721,3 +1721,126 @@ describe('Хранилище: надёжность записи', () => {
     ok(document.getElementById('search'), 'панель поиска на месте');
   });
 });
+
+describe('Производительность и кэши (P0)', () => {
+  test('кэш поискового текста сбрасывается после переключения задачи', () => {
+    seed([], [{ id: 'n1', title: 'Дело', body: '- [ ] купить хлеб', tagIds: [] }]);
+    app.onSearch('[x]');
+    strictEqual(app.searchScopeNotes().length, 0);
+    app.toggleNoteTask('n1', 0);
+    app.onSearch('[x]');
+    strictEqual(app.searchScopeNotes().length, 1, 'задача отмечена — поиск видит новое тело');
+    app.flushStateSave();
+  });
+
+  test('индекс заметок по id обновляется после удаления из массива', () => {
+    seed([], [
+      { id: 'n1', title: 'Первая', tagIds: [] },
+      { id: 'n2', title: 'Вторая', tagIds: [] }
+    ]);
+    strictEqual(app.noteById('n2').title, 'Вторая');
+    app.state.notes.splice(0, 1);
+    strictEqual(app.noteById('n1'), null);
+    strictEqual(app.noteById('n2').title, 'Вторая');
+  });
+
+  test('индекс обратных ссылок сбрасывается при изменении данных', () => {
+    seed([], [
+      { id: 'n1', title: 'Цель', tagIds: [] },
+      { id: 'n2', title: 'Ссылка', body: 'без ссылки', tagIds: [] }
+    ]);
+    strictEqual(app.noteBacklinks(app.state.notes[0]).length, 0);
+    app.state.notes[1].body = 'теперь [[Цель]]';
+    app.invalidateTree();
+    deepEqual(app.noteBacklinks(app.state.notes[0]).map(n => n.id), ['n2']);
+  });
+
+  test('сниппет поиска сдвигается к найденному фрагменту', () => {
+    const prefix = 'начало текста '.repeat(12); // больше 140 символов
+    seed([], [{ id: 'n1', title: 'Длинная', body: prefix + ' иголка в конце', tagIds: [] }]);
+    app.onSearch('иголка');
+    app.renderNotes();
+    const preview = document.querySelector('#notes .preview');
+    ok(preview.textContent.startsWith('…'), 'сниппет начинается с многоточия');
+    ok(preview.textContent.includes('иголка'), 'найденный текст попал в превью');
+  });
+
+  test('отложенная запись оценки сбрасывается через flushStateSave', () => {
+    seed([], [{ id: 'n1', title: 'Оценка', body: '', tagIds: [] }]);
+    app.rateNoteFromCard('n1', 4);
+    app.flushStateSave();
+    const saved = JSON.parse(app.storageGet('noteTreeData_v1'));
+    strictEqual(saved.notes[0].rating, 4);
+    app.flushStateSave(); // повторный вызов безопасен
+  });
+});
+
+describe('Надёжность и UX (P1)', () => {
+  test('черновик редактора переживает закрытие и очищается после сохранения', () => {
+    seed([], [{ id: 'n1', title: 'Черновик', body: 'старое', tagIds: [], updated: 1 }]);
+    app.openEditor('n1');
+    document.getElementById('fTitle').value = 'Несохранённый заголовок';
+    app.scheduleDraftSave();
+    app.flushDraftSave();
+    ok(app.readStoredDraft(), 'черновик записан');
+    app.closeEditor();
+    app.openEditor('n1');
+    strictEqual(document.getElementById('fTitle').value, 'Несохранённый заголовок', 'черновик восстановлен');
+    strictEqual(app.editorDirty(), true, 'восстановленный черновик помечен как несохранённый');
+    app.saveNote();
+    strictEqual(app.storageGet('noteTreeDraft'), '', 'после сохранения черновик очищен');
+  });
+
+  test('переименование заметки обновляет [[ссылки]] в других заметках', () => {
+    seed([], [
+      { id: 'n1', title: 'Старое имя', body: '', tagIds: [], updated: 1 },
+      { id: 'n2', title: 'Ссылка', body: 'см. [[Старое имя]]', tagIds: [], updated: 1 }
+    ]);
+    app.openEditor('n1');
+    document.getElementById('fTitle').value = 'Новое имя';
+    app.saveNote();
+    strictEqual(app.noteById('n1').title, 'Новое имя');
+    strictEqual(app.noteById('n2').body, 'см. [[Новое имя]]');
+    strictEqual(app.noteBacklinks(app.noteById('n1'))[0].id, 'n2');
+  });
+
+  test('validateImport отсекает структурно неверные данные', () => {
+    strictEqual(app.validateImport({ tags: [{ id: 't1', name: 'x' }], notes: [{ id: 'n1', title: 'a' }] }).ok, true);
+    strictEqual(app.validateImport({ tags: [], notes: [{ title: [] }] }).ok, false);
+    strictEqual(app.validateImport({ tags: 'x', notes: [] }).ok, false);
+    strictEqual(app.validateImport([{ title: 'старый формат', tags: ['a'] }]).ok, true);
+    strictEqual(app.validateImport({ notes: 'nope' }).ok, false);
+  });
+
+  test('фильтры task: и links: агрегируют задачи и связи', () => {
+    seed([], [
+      { id: 'n1', title: 'Задача', body: '- [ ] сделать', tagIds: [] },
+      { id: 'n2', title: 'Готово', body: '- [x] сделано', tagIds: [] },
+      { id: 'n3', title: 'Ссылка', body: 'см. [[Задача]]', tagIds: [] },
+      { id: 'n4', title: 'Одинокая', body: 'текст', tagIds: [] }
+    ]);
+    deepEqual(app.taskStats(app.noteById('n1')), { open: 1, done: 0, total: 1 });
+    app.onSearch('task:open');
+    deepEqual(app.searchScopeNotes().map(n => n.id), ['n1']);
+    app.onSearch('task:done');
+    deepEqual(app.searchScopeNotes().map(n => n.id), ['n2']);
+    app.onSearch('links:out');
+    deepEqual(app.searchScopeNotes().map(n => n.id), ['n3']);
+    app.onSearch('links:in');
+    deepEqual(app.searchScopeNotes().map(n => n.id), ['n1']);
+    app.onSearch('links:orphan');
+    deepEqual(app.searchScopeNotes().map(n => n.id).sort(), ['n2', 'n4']);
+  });
+});
+
+describe('Релевантность (P2)', () => {
+  test('сортировка по релевантности ставит точное совпадение в заголовке выше', () => {
+    seed([], [
+      { id: 'n1', title: 'Яблоко', body: 'коротко', tagIds: [], updated: 1 },
+      { id: 'n2', title: 'Другое', body: 'яблоко '.repeat(5), tagIds: [], updated: 2 }
+    ]);
+    app.onSearch('яблоко');
+    const sorted = app.sortNotes(app.state.notes, 'relevance');
+    strictEqual(sorted[0].id, 'n1');
+  });
+});
