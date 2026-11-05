@@ -2005,3 +2005,123 @@ describe('Доступность дерева (P2)', () => {
     strictEqual(document.querySelector('#tree .node-row[data-path="a"]').getAttribute('aria-selected'), 'true');
   });
 });
+
+describe('Оптимизации и надёжность (P3)', () => {
+  test('notesForPath берёт готовый набор из дерева', () => {
+    seed(
+      [{ id: 't1', name: 'a' }, { id: 't2', name: 'b' }],
+      [
+        { id: 'n1', title: 'AB', tagIds: ['t1', 't2'] },
+        { id: 'n2', title: 'A', tagIds: ['t1'] },
+        { id: 'n3', title: 'B', tagIds: ['t2'] }
+      ]
+    );
+    deepEqual(app.notesForPath(['a']).map(n => n.id).sort(), ['n1', 'n2']);
+    deepEqual(app.notesForPath(['a', 'b']).map(n => n.id), ['n1']);
+    deepEqual(app.notesForPath(['нет']), []);
+    app.currentPath = ['b'];
+    deepEqual(app.notesInPath().map(n => n.id).sort(), ['n1', 'n3']);
+  });
+
+  test('догрузка добавляет карточки, не пересобирая уже показанные', () => {
+    const notes = [];
+    for (let i = 0; i < 250; i++) notes.push({ id: 'n' + i, title: 'N' + i, tagIds: [], updated: i });
+    seed([], notes);
+    app.renderNotes();
+    const first = document.querySelector('#notes .note-card');
+    strictEqual(document.querySelectorAll('#notes .note-card').length, 200);
+    strictEqual(app.appendMoreNotes(), true);
+    strictEqual(document.querySelector('#notes .note-card'), first, 'первая карточка осталась тем же DOM-узлом');
+    strictEqual(document.querySelectorAll('#notes .note-card').length, 250);
+    strictEqual(app.appendMoreNotes(), false);
+  });
+
+  test('Ctrl+S сохраняет заметку из редактора', () => {
+    seed([], [{ id: 'n1', title: 'Старая', body: 'текст', tagIds: [], updated: 1 }]);
+    app.openEditor('n1');
+    document.getElementById('fTitle').value = 'Новая';
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 's', ctrlKey: true, bubbles: true }));
+    strictEqual(app.noteById('n1').title, 'Новая');
+    strictEqual(app.editorOpen, false, 'редактор закрылся после сохранения');
+  });
+
+  test('«?» открывает справку, фокус возвращается после закрытия диалога', () => {
+    const trigger = document.getElementById('newNoteBtn');
+    trigger.focus();
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true }));
+    const mask = document.getElementById('dialogMask');
+    ok(mask.classList.contains('show'), 'диалог справки открыт');
+    ok(document.getElementById('dialogMsg').textContent.includes('Ctrl/Cmd+N'));
+    app.dialogClose(false);
+    strictEqual(mask.classList.contains('show'), false);
+    strictEqual(document.activeElement, trigger, 'фокус вернулся на кнопку');
+  });
+
+  test('ошибки промисов попадают в журнал диагностики', () => {
+    const ev = new window.Event('unhandledrejection');
+    ev.reason = new Error('асинхронный сбой');
+    window.dispatchEvent(ev);
+    ok(app.runtimeErrors.length > 0);
+    strictEqual(app.runtimeErrors[0].msg, 'асинхронный сбой');
+  });
+
+  test('черновики ограничены и по количеству, и по общему размеру', () => {
+    ok(app.HEAVY_KEYS.includes(app.DRAFT_KEY), 'черновики — тяжёлый ключ (IndexedDB)');
+    const notes = [];
+    for (let i = 0; i < 5; i++) notes.push({ id: 'n' + i, title: 'a', tagIds: [] });
+    seed([], notes);
+    const drafts = {};
+    for (let i = 0; i < 5; i++) {
+      drafts['n' + i] = { title: 't', body: 'x'.repeat(200 * 1024), tags: [], rating: 0, ts: Date.now() + i };
+    }
+    app.writeDraftStore({ drafts: { ...drafts, n1: { ...drafts.n1, body: 'короткий' } } });
+    const stored = JSON.parse(app.storageGet(app.DRAFT_KEY));
+    let bytes = 0;
+    Object.values(stored.drafts).forEach(d => { bytes += (d.title || '').length * 2 + (d.body || '').length * 2; });
+    ok(bytes <= app.DRAFT_BYTES_LIMIT + 1024, 'общий размер черновиков в пределах лимита');
+    ok(stored.drafts.n1, 'самый свежий черновик сохранён');
+  });
+
+  test('автоснимки прореживаются, ручной снимок создаётся всегда', () => {
+    app.saveSnapshots([{ ts: Date.now(), sig: '1:n1', count: 1, data: { tags: [], notes: [] } }]);
+    seed([], [{ id: 'n2', title: 'Новая', tagIds: [] }]);
+    strictEqual(app.maybeSnapshot(), false, 'слишком рано для нового автоснимка');
+    strictEqual(app.maybeSnapshot(true), true, 'ручной снимок игнорирует интервал');
+  });
+
+  test('импорт Markdown разбирает заголовки, тэги и оценку', () => {
+    seed([{ id: 't1', name: 'работа' }], [
+      { id: 'n1', title: 'План', body: 'Первая строка\nВторая', tagIds: ['t1'], rating: 4 }
+    ]);
+    const md = app.exportMdText(app.state.notes);
+    const parsed = app.parseMarkdownImport(md);
+    strictEqual(parsed.length, 1);
+    strictEqual(parsed[0].title, 'План');
+    ok(parsed[0].body.includes('Первая строка'));
+    deepEqual(parsed[0].tags, ['работа']);
+    strictEqual(parsed[0].rating, 4);
+    // Заголовок внутри блока кода не делит заметку.
+    const one = app.parseMarkdownImport('# A\n```\n# не заголовок\n```\nтело');
+    strictEqual(one.length, 1);
+    ok(one[0].body.includes('# не заголовок'));
+  });
+
+  test('сохранённые представления экспортируются вместе с данными', () => {
+    app.saveViews([{ name: 'Работа', query: '#работа', sort: 'updated', scope: 'all' }]);
+    const data = app.serializeData();
+    deepEqual(data.views.map(v => v.name), ['Работа']);
+  });
+
+  test('«Выбрать все» выделяет весь текущий список', () => {
+    seed([], [
+      { id: 'n1', title: 'A', tagIds: [], updated: 3 },
+      { id: 'n2', title: 'B', tagIds: [], updated: 2 },
+      { id: 'n3', title: 'C', tagIds: [], updated: 1 }
+    ]);
+    app.renderNotes();
+    app.bulkSelectAll();
+    deepEqual(app.bulkSelected.sort(), ['n1', 'n2', 'n3']);
+    app.clearBulkSelection();
+    strictEqual(app.bulkSelected.length, 0);
+  });
+});

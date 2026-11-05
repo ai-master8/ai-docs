@@ -223,6 +223,7 @@
     box-shadow: var(--shadow); padding: 16px; cursor: pointer;
     transition: transform .12s, box-shadow .2s, border-color .2s;
     display: flex; flex-direction: column; gap: 10px;
+    content-visibility: auto; contain-intrinsic-size: auto 190px;
   }
   .note-card:hover { transform: translateY(-3px); border-color: var(--accent); box-shadow: var(--shadow-hover); }
   .note-card.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
@@ -577,7 +578,7 @@
   <button id="diagBtn" title="Состояние хранилища и диагностика" aria-label="Диагностика хранилища">ℹ️</button>
   <button id="tagsBtn" title="Менеджер тэгов" aria-label="Менеджер тэгов">🏷️</button>
   <button id="exportBtn" title="Скачать JSON">⬇️ <span class="btn-label">Экспорт</span></button>
-  <button id="importBtn" title="Загрузить JSON">⬆️ <span class="btn-label">Импорт</span></button>
+  <button id="importBtn" title="Загрузить JSON или Markdown">⬆️ <span class="btn-label">Импорт</span></button>
   <button id="themeBtn" title="Переключить тему" aria-label="Переключить тему">🌙</button>
   <button id="newNoteBtn" class="primary" title="Новая заметка (Ctrl+N)">＋ <span class="btn-label">Заметка</span></button>
 </header>
@@ -619,6 +620,7 @@
     <div class="breadcrumbs" id="breadcrumbs"></div>
     <div class="bulk-bar" id="bulkBar" hidden>
       <span class="bulk-count" id="bulkCount">Выбрано: 0</span>
+      <button type="button" id="bulkAllBtn" title="Выбрать все заметки текущего списка">Выбрать все</button>
       <span class="spacer"></span>
       <button type="button" id="bulkTagBtn" title="Добавить тэги выбранным заметкам">🏷️ Тэги</button>
       <button type="button" id="bulkMoveBtn" title="Переместить выбранные заметки в папку">📁 Переместить</button>
@@ -731,7 +733,7 @@
 </main>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
-<input type="file" id="fileInput" accept=".json" style="display:none">
+<input type="file" id="fileInput" accept=".json,.md,.markdown,.txt" style="display:none">
 
 <!-- Менеджер тэгов: список всех тэгов с действиями -->
 <div class="modal-mask" id="tagManagerMask">
@@ -854,7 +856,7 @@ const IDB_NAME = 'noteTreeDB';
 const IDB_STORE = 'kv';
 const IDB_VERSION = 1;
 // Ключи, которые живут в IndexedDB (всё остальное — в localStorage).
-const HEAVY_KEYS = [LS_KEY, LS_KEY + '_backup', SNAPSHOT_KEY, TRASH_KEY];
+const HEAVY_KEYS = [LS_KEY, LS_KEY + '_backup', SNAPSHOT_KEY, TRASH_KEY, DRAFT_KEY];
 const heavyKeySet = new Set(HEAVY_KEYS);
 
 const IDB_INIT_TIMEOUT = 3000;  // мс на открытие базы, дальше — фолбэк на localStorage
@@ -1278,6 +1280,7 @@ function renameWikiLinks(oldTitle, newTitle, skipId) {
     } else {
       n.body = next;
     }
+    invalidateNoteCaches(n);
     changed++;
   });
   return changed;
@@ -1591,6 +1594,9 @@ function notesSignature() {
   snapshotSigCache = { ref: notes, length: notes.length, sig };
   return sig;
 }
+// Автоснимки прореживаем: даже при активной работе не чаще раза в 5 минут,
+// иначе каждое добавление/удаление заметки плодит полную копию архива.
+const SNAPSHOT_MIN_INTERVAL = 5 * 60 * 1000;
 // Сделать снимок текущего состояния, если состав заметок изменился с прошлого снимка.
 function maybeSnapshot(force) {
   if (state.notes.length === 0) return false;
@@ -1598,6 +1604,7 @@ function maybeSnapshot(force) {
   const signature = notesSignature();
   const lastSig = list.length ? list[0].sig : null;
   if (!force && signature === lastSig) return false;
+  if (!force && list.length && (Date.now() - Number(list[0].ts || 0)) < SNAPSHOT_MIN_INTERVAL) return false;
   const snapshot = {
     ts: Date.now(),
     sig: signature,
@@ -1824,10 +1831,20 @@ function tagsOf(n) {
 const MAX_PERM_TAGS = 5;
 // Тэги, участвующие в путях дерева (первые MAX_PERM_TAGS).
 function pathTagsOf(n) { return tagsOf(n).slice(0, MAX_PERM_TAGS); }
+// Кэш перестановок по набору имён тэгов: у заметок с одинаковым набором
+// (частый случай после массовых операций) пути не генерируются заново.
+let permCache = new Map();
+const EMPTY_PATHS = [[]];
 function notePaths(n) {
   const t = pathTagsOf(n);
-  if (t.length === 0) return [[]];
-  return permute(t);
+  if (t.length === 0) return EMPTY_PATHS;
+  const key = t.slice().sort().join('\u0001');
+  let paths = permCache.get(key);
+  if (!paths) {
+    paths = permute(t);
+    permCache.set(key, paths);
+  }
+  return paths;
 }
 // Полный список тэгов (для подсказок в редакторе), из таблицы.
 function allTags() {
@@ -1877,6 +1894,7 @@ function searchHaystack(n) {
 // Инвалидация при изменении данных: сбрасываем дерево, счётчики и кэши.
 function invalidateTree() {
   treeCache = null;
+  permCache = new Map();
   tagCountsCache = null;
   tagsLowerCache = new Map();
   searchTextCache = new Map();
@@ -1918,6 +1936,17 @@ function buildTree() {
 // Перерисовать дерево. Если данные не менялись (treeDirty === false), DOM не
 // пересобирается: обновляются только активная строка, шевроны и видимость детей.
 // Это убирает полную пересборку дерева при каждом переходе по папкам.
+function updateRootNoteLabel(note) {
+  if (!note) return;
+  const rows = document.querySelectorAll('#tree .root-note');
+  for (const row of rows) {
+    if (row.dataset.noteId === note.id) {
+      const nm = row.querySelector('.nm');
+      if (nm) nm.textContent = note.title || UNTITLED;
+      return;
+    }
+  }
+}
 function renderTree() {
   const el = document.getElementById('tree');
   if (!treeDirty && el.dataset.built === '1') { applyTreeState(); return; }
@@ -2122,7 +2151,7 @@ function paletteCommands() {
     { label: '➕ Новая заметка', hint: 'Ctrl+N', run: () => openEditor() },
     { label: '🏷️ Менеджер тэгов', hint: '', run: () => openTagManager() },
     { label: '⬇️ Экспорт JSON', hint: '', run: () => exportData() },
-    { label: '⬆️ Импорт JSON', hint: '', run: () => importData() },
+    { label: '⬆️ Импорт JSON / Markdown', hint: '', run: () => importData() },
     { label: '⬇️ Экспорт Markdown', hint: '', run: () => exportMd(state.notes) },
     { label: '⬇️ Экспорт TXT', hint: '', run: () => exportTxt(state.notes) },
     { label: '🎯 Экспорт найденного (MD)', hint: '', run: () => exportFound() },
@@ -2133,6 +2162,7 @@ function paletteCommands() {
     { label: '🗑 Корзина заметок', hint: '', run: () => trashMenu() },
     { label: '↩ Отменить последнее действие', hint: 'Ctrl+Z', run: () => undoLastAction() },
     { label: '↪ Повторить отменённое действие', hint: 'Ctrl+Shift+Z', run: () => redoLastAction() },
+    { label: '❓ Справка по клавишам', hint: '?', run: () => showHelp() },
     { label: 'ℹ️ Диагностика хранилища', hint: '', run: () => showDiagnostics() },
     { label: '🔄 Перечитать данные из хранилища', hint: '', run: () => reloadFromStorage() },
     { label: '✅ Открытые задачи', hint: 'task:open', run: () => onSearch('task:open') },
@@ -2144,6 +2174,7 @@ function paletteCommands() {
 }
 function openPalette() {
   const mask = document.getElementById('paletteMask');
+  rememberModalFocus(mask);
   mask.classList.add('show');
   const inp = document.getElementById('paletteInput');
   inp.value = '';
@@ -2151,7 +2182,9 @@ function openPalette() {
   setTimeout(() => inp.focus(), 30);
 }
 function closePalette() {
-  document.getElementById('paletteMask').classList.remove('show');
+  const mask = document.getElementById('paletteMask');
+  mask.classList.remove('show');
+  restoreModalFocus(mask);
 }
 // Оценка совпадения для палитры: точное/начало/подстрока/нечёткое.
 function paletteScore(text, q) {
@@ -2542,9 +2575,23 @@ function matchesSearch(n) {
   }
   return true;
 }
+// Заметки произвольной папки по готовому индексу дерева (node.ids), без
+// перебора всего архива. Порядок — как в state.notes (ids добавляются в том же
+// порядке при buildTree).
+function notesForPath(path) {
+  let node = buildTree();
+  for (let i = 0; i < path.length; i++) {
+    if (!node) return [];
+    node = node.children.get(path[i]);
+  }
+  if (!node) return [];
+  const out = [];
+  node.ids.forEach(id => { const n = noteById(id); if (n) out.push(n); });
+  return out;
+}
 // Заметки папки currentPath (без учёта поиска).
 function notesInPath() {
-  return state.notes.filter(n => noteBelongsToPath(n, currentPath));
+  return notesForPath(currentPath);
 }
 // Область поиска: «Везде» — весь архив, «В папке» — только currentPath.
 function inSearchScope(n) {
@@ -2554,7 +2601,10 @@ function matchesSearchScoped(n) {
   return inSearchScope(n) && matchesSearch(n);
 }
 function searchScopeNotes() {
-  return state.notes.filter(matchesSearchScoped);
+  // В режиме «В папке» сначала берём готовый набор из дерева: не нужно
+  // проверять принадлежность для каждой заметки архива.
+  if (searchScope === 'folder') return notesForPath(currentPath).filter(matchesSearch);
+  return state.notes.filter(matchesSearch);
 }
 
 // ---------- Markdown (безопасный поднабор) ----------
@@ -2879,6 +2929,7 @@ const NOTES_CHUNK = 200;
 let notesRenderLimit = NOTES_CHUNK;
 let notesRenderKey = '';
 let notesTotalCount = 0; // сколько всего заметок в текущем списке (для подгрузки)
+let notesCurrentList = []; // отсортированный список текущего контекста (для догрузки)
 // Массовое выделение карточек (Ctrl/Cmd+клик, Shift+клик по диапазону).
 let bulkSelected = new Set();
 let bulkAnchorId = null;
@@ -2902,18 +2953,21 @@ function refreshBulkCards() {
   });
 }
 function clearBulkSelection() {
+  if (!bulkSelected.size && !bulkAnchorId) { updateBulkBar(); return; }
   bulkSelected.clear();
   bulkAnchorId = null;
   refreshBulkCards();
   updateBulkBar();
 }
-function toggleBulkSelection(id, forceAdd) {
+function toggleBulkSelection(id, forceAdd, cardEl) {
   if (!id) return;
   if (forceAdd) bulkSelected.add(id);
   else if (bulkSelected.has(id)) bulkSelected.delete(id);
   else bulkSelected.add(id);
   bulkAnchorId = id;
-  refreshBulkCards();
+  // Обновляем только затронутую карточку, а не все карточки списка.
+  const card = cardEl || findNoteCard(id);
+  if (card) card.classList.toggle('bulk-selected', bulkSelected.has(id));
   updateBulkBar();
 }
 function bulkSelectRange(toId) {
@@ -2931,6 +2985,15 @@ function bulkSelectRange(toId) {
 }
 function bulkSelectedNotes() {
   return state.notes.filter(n => bulkSelected.has(n.id));
+}
+// Выбрать все заметки текущего списка (папки/поиска), а не только показанную порцию.
+function bulkSelectAll() {
+  if (!notesCurrentList.length) { notify('⚠️ В списке нет заметок'); return; }
+  notesCurrentList.forEach(n => bulkSelected.add(n.id));
+  bulkAnchorId = notesCurrentList[0].id;
+  refreshBulkCards();
+  updateBulkBar();
+  notify('Выбрано заметок: ' + bulkSelected.size);
 }
 // Проверка перед массовой операцией: есть выделение и редактор закрыт
 // (иначе сохранение из редактора может перезаписать изменения).
@@ -3033,9 +3096,79 @@ function resetNotesRenderChunk() {
 }
 // Подгрузить следующую порцию карточек (кнопка, прокрутка, клавиатура).
 function loadMoreNotes() {
-  if (notesRenderLimit >= notesTotalCount) return false;
-  notesRenderLimit += NOTES_CHUNK;
-  renderNotes();
+  return appendMoreNotes();
+}
+// Карточка заметки одной HTML-строкой. Пользовательский текст — только через
+// escapeHtml/renderMarkdown. Вынесено отдельно, чтобы догрузка не пересобирала
+// уже показанные карточки.
+function noteCardHtml(n) {
+  const preview = previewText(n.body, searchQuery);
+  const dt = humanDate(n.updated || n.created);
+  const pathTags = pathTagsOf(n);
+  const pathText = pathTags.length ? pathTags.join(' / ') : 'Без тэга';
+  const pathHtml = searchQuery
+    ? `<div class="note-path"><span class="np-text" title="${escapeHtml(pathText)}">${escapeHtml(pathText)}</span>`
+      + `<button type="button" class="np-show" data-path="${escapeHtml(JSON.stringify(pathTags))}" title="Показать в дереве">в дереве</button></div>`
+    : '';
+  const tagsHtml = tagsOf(n).map(t => {
+    const c = safeCssColor(tagColor(t));
+    const style = c ? ` style="background:${c};color:#fff"` : '';
+    const title = escapeHtml('Открыть папку тэга «' + t + '»');
+    return `<span class="tag clk" data-tag="${escapeHtml(t)}" title="${title}"${style}>${escapeHtml(t)}</span>`;
+  }).join('');
+  const cls = 'note-card' + (n.pinned ? ' pinned' : '') + (selectedId === n.id ? ' selected' : '')
+    + (bulkSelected.has(n.id) ? ' bulk-selected' : '');
+  const stars = starsHtml(n.rating, true);
+  return `<div class="${cls}" data-note-id="${escapeHtml(n.id)}" tabindex="0" draggable="true">`
+    + `<h3>${escapeHtml((n.pinned ? '📌 ' : '') + (n.title || UNTITLED))}</h3>`
+    + `<div class="preview">${renderMarkdown(preview)}</div>`
+    + pathHtml
+    + `<div class="tags">${tagsHtml}</div>`
+    + `<div class="dt"><span>Обновлено: ${escapeHtml(dt)}</span>${stars}</div>`
+    + `</div>`;
+}
+function notesCardsHtml(list) {
+  return list.map(noteCardHtml).join('');
+}
+// Обновить кнопку «Показать ещё» и подпись в заголовке списка.
+function updateNotesMoreButton() {
+  const container = document.getElementById('notes');
+  if (!container) return;
+  const btn = document.getElementById('notesMoreBtn');
+  const total = notesCurrentList.length;
+  const shown = Math.min(notesRenderLimit, total);
+  const hidden = total - shown;
+  if (hidden > 0) {
+    const label = 'Показать ещё ' + Math.min(NOTES_CHUNK, hidden) + ' из ' + hidden;
+    if (btn) btn.textContent = label;
+    else container.insertAdjacentHTML('beforeend', `<button type="button" class="notes-more" id="notesMoreBtn">${label}</button>`);
+    container.title = 'Показано ' + shown + ' из ' + total + ' заметок';
+  } else {
+    if (btn) btn.remove();
+    container.removeAttribute('title');
+  }
+}
+// Догрузить следующую порцию без пересборки уже показанных карточек.
+// Сохраняет прокрутку, фокус и не парсит заново весь список.
+function appendMoreNotes() {
+  if (notesRenderLimit >= notesCurrentList.length) return false;
+  const container = document.getElementById('notes');
+  if (!container) return false;
+  const from = notesRenderLimit;
+  const to = Math.min(from + NOTES_CHUNK, notesCurrentList.length);
+  notesRenderLimit = to;
+  const html = notesCardsHtml(notesCurrentList.slice(from, to));
+  const btn = document.getElementById('notesMoreBtn');
+  if (btn) btn.insertAdjacentHTML('beforebegin', html);
+  else container.insertAdjacentHTML('beforeend', html);
+  // Подсветка только новых карточек, а не всего списка.
+  const cards = container.querySelectorAll('.note-card');
+  for (let i = from; i < cards.length; i++) {
+    const p = cards[i].querySelector('.preview');
+    if (p) highlightElement(p, searchQuery);
+  }
+  updateNotesMoreButton();
+  updateBulkBar();
   return true;
 }
 function renderNotes() {
@@ -3048,6 +3181,7 @@ function renderNotes() {
   notes = sortNotes(notes, sortMode);
   // закреплённые заметки — всегда сверху
   notes = notes.filter(n => n.pinned).concat(notes.filter(n => !n.pinned));
+  notesCurrentList = notes;
   notesTotalCount = notes.length;
 
   // Смена контекста (поиск/папка/сортировка) начинает список заново.
@@ -3087,6 +3221,7 @@ function renderNotes() {
     container.innerHTML = `<div class="empty"><div class="big">🗂️</div>`
       + `<div class="empty-title">${escapeHtml(title)}</div><div class="empty-sub">${escapeHtml(sub)}</div>`
       + `<div class="empty-actions">${actions}</div></div>`;
+    container.removeAttribute('title');
     const openBtn = container.querySelector('#openDataBtn');
     if (openBtn) openBtn.onclick = () => importData();
     const resetBtn = container.querySelector('#emptyResetBtn');
@@ -3095,92 +3230,84 @@ function renderNotes() {
     if (newBtn) newBtn.onclick = () => openEditor();
     return;
   }
-  // Карточки собираем одной строкой HTML (один парс вместо тысяч appendChild).
-  // Весь пользовательский текст — через escapeHtml, превью — через renderMarkdown.
-  const parts = visible.map(n => {
-    const preview = previewText(n.body, searchQuery);
-    const dt = humanDate(n.updated || n.created);
-    const pathTags = pathTagsOf(n);
-    const pathText = pathTags.length ? pathTags.join(' / ') : 'Без тэга';
-    const pathHtml = searchQuery
-      ? `<div class="note-path"><span class="np-text" title="${escapeHtml(pathText)}">${escapeHtml(pathText)}</span>`
-        + `<button type="button" class="np-show" data-path="${escapeHtml(JSON.stringify(pathTags))}" title="Показать в дереве">в дереве</button></div>`
-      : '';
-    const tagsHtml = tagsOf(n).map(t => {
-      const c = safeCssColor(tagColor(t));
-      const style = c ? ` style="background:${c};color:#fff"` : '';
-      const title = escapeHtml('Открыть папку тэга «' + t + '»');
-      return `<span class="tag clk" data-tag="${escapeHtml(t)}" title="${title}"${style}>${escapeHtml(t)}</span>`;
-    }).join('');
-    const cls = 'note-card' + (n.pinned ? ' pinned' : '') + (selectedId === n.id ? ' selected' : '')
-      + (bulkSelected.has(n.id) ? ' bulk-selected' : '');
-    const stars = starsHtml(n.rating, true);
-    return `<div class="${cls}" data-note-id="${escapeHtml(n.id)}" tabindex="0" draggable="true">`
-      + `<h3>${escapeHtml((n.pinned ? '📌 ' : '') + (n.title || UNTITLED))}</h3>`
-      + `<div class="preview">${renderMarkdown(preview)}</div>`
-      + pathHtml
-      + `<div class="tags">${tagsHtml}</div>`
-      + `<div class="dt"><span>Обновлено: ${escapeHtml(dt)}</span>${stars}</div>`
-      + `</div>`;
-  });
-  const hiddenCount = notes.length - visible.length;
-  container.innerHTML = parts.join('')
-    + (hiddenCount > 0
-      ? `<button type="button" class="notes-more" id="notesMoreBtn">Показать ещё ${Math.min(NOTES_CHUNK, hiddenCount)} из ${hiddenCount}</button>`
-      : '');
-  if (hiddenCount > 0) {
-    const moreText = 'Показано ' + visible.length + ' из ' + notes.length + ' заметок';
-    container.title = moreText;
-  } else {
-    container.removeAttribute('title');
-  }
+  container.innerHTML = notesCardsHtml(visible);
+  updateNotesMoreButton();
   // Подсветка поиска — только в превью, по текстовым узлам (безопасно для HTML).
   container.querySelectorAll('.preview').forEach(el => highlightElement(el, searchQuery));
   updateBulkBar();
 }
+// End — к последней заметке всего списка. Догружаем порциями через rAF,
+// чтобы не рисовать десятки тысяч карточек одним синхронным innerHTML.
+function loadAllNotesForEnd() {
+  let guard = 0;
+  const step = () => {
+    const more = appendMoreNotes();
+    if (more && guard++ < 10000) {
+      if (window.requestAnimationFrame) window.requestAnimationFrame(step);
+      else setTimeout(step, 0);
+      return;
+    }
+    const cards = document.querySelectorAll('#notes .note-card');
+    if (cards.length) cards[cards.length - 1].focus();
+  };
+  step();
+}
 
+// Следующая/предыдущая карточка среди соседних элементов списка.
+function adjacentNoteCard(card, dir) {
+  let el = dir > 0 ? card.nextElementSibling : card.previousElementSibling;
+  while (el && !el.classList.contains('note-card')) el = dir > 0 ? el.nextElementSibling : el.previousElementSibling;
+  return el && el.classList.contains('note-card') ? el : null;
+}
 // Навигация по карточкам заметок клавиатурой: стрелки — фокус, Enter — открыть,
-// Delete/Backspace — удалить (с подтверждением).
+// Delete/Backspace — удалить (с подтверждением). Не собираем массив всех
+// карточек на каждое нажатие: для больших списков это было O(N).
 function notesKeyNav(e) {
-  const cards = [...document.querySelectorAll('#notes .note-card')];
-  if (cards.length === 0) return;
-  const idx = cards.indexOf(document.activeElement);
-  const focusAt = (i) => { const c = cards[Math.max(0, Math.min(cards.length - 1, i))]; if (c) c.focus(); };
-  // На последней загруженной карточке стрелка вниз/вправо подгружает следующую порцию.
-  const moreBtn = document.getElementById('notesMoreBtn');
-  if (moreBtn && idx === cards.length - 1 && (e.key === 'ArrowDown' || e.key === 'ArrowRight')) {
+  const active = document.activeElement;
+  const card = active && active.closest ? active.closest('#notes .note-card') : null;
+  if (!card) return;
+  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
     e.preventDefault();
-    const prevCount = cards.length;
-    notesRenderLimit += NOTES_CHUNK;
-    renderNotes();
-    const next = document.querySelectorAll('#notes .note-card')[prevCount];
-    if (next) next.focus();
+    const next = adjacentNoteCard(card, 1);
+    if (next) { next.focus(); return; }
+    if (document.getElementById('notesMoreBtn') && appendMoreNotes()) {
+      const added = adjacentNoteCard(card, 1);
+      if (added) added.focus();
+    }
     return;
   }
-  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') { e.preventDefault(); focusAt(idx + 1); }
-  else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); focusAt(idx - 1); }
-  else if (e.key === 'Home') { e.preventDefault(); focusAt(0); }
-  else if (e.key === 'End') {
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
     e.preventDefault();
-    // End — к последней заметке всего списка, а не только загруженной порции.
-    if (notesRenderLimit < notesTotalCount) { notesRenderLimit = notesTotalCount; renderNotes(); }
-    const all = [...document.querySelectorAll('#notes .note-card')];
-    if (all.length) all[all.length - 1].focus();
+    const prev = adjacentNoteCard(card, -1);
+    if (prev) prev.focus();
+    return;
+  }
+  if (e.key === 'Home') {
+    e.preventDefault();
+    const first = document.querySelector('#notes .note-card');
+    if (first) first.focus();
+    return;
+  }
+  if (e.key === 'End') {
+    e.preventDefault();
+    // End — к последней заметке всего списка, порциями через rAF.
+    loadAllNotesForEnd();
+    return;
   }
   // Оценка с клавиатуры: 1–5 ставят звёзды, 0 сбрасывает (как в редакторе).
-  else if (idx >= 0 && /^[0-5]$/.test(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey) {
+  if (/^[0-5]$/.test(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey) {
     e.preventDefault();
-    rateNoteFromCard(cards[idx].dataset.noteId, Number(e.key));
+    rateNoteFromCard(card.dataset.noteId, Number(e.key));
   }
-  else if (e.key === 'Enter' && idx >= 0) {
+  else if (e.key === 'Enter') {
     e.preventDefault();
-    const id = cards[idx].dataset.noteId;
+    const id = card.dataset.noteId;
     if (id) selectNote(id);
   }
-  else if ((e.key === 'Delete' || e.key === 'Backspace') && idx >= 0) {
+  else if (e.key === 'Delete' || e.key === 'Backspace') {
     e.preventDefault();
     if (bulkSelected.size) { bulkDelete(); return; }
-    const id = cards[idx].dataset.noteId;
+    const id = card.dataset.noteId;
     if (id) deleteNote(id);
   }
   else if (e.key === 'Escape' && bulkSelected.size) { e.preventDefault(); clearBulkSelection(); }
@@ -3629,6 +3756,7 @@ function editorStateString() {
 const DRAFT_DEBOUNCE = 500;
 const DRAFT_MAX = 20;
 const DRAFT_TTL = 30 * 86400000;
+const DRAFT_BYTES_LIMIT = 512 * 1024; // общий размер черновиков (символы ≈ байты UTF-16)
 function draftKeyFor(noteId) { return noteId || '__new__'; }
 function cancelDraftSave() {
   if (draftTimer) { clearTimeout(draftTimer); draftTimer = null; }
@@ -3659,9 +3787,21 @@ function writeDraftStore(store) {
     .filter(x => (now - Number(x.draft.ts || 0)) < DRAFT_TTL)
     .sort((a, b) => Number(b.draft.ts || 0) - Number(a.draft.ts || 0))
     .slice(0, DRAFT_MAX);
+  // Общий лимит размера: 20 полных текстов могут занять мегабайты. Храним
+  // самые свежие черновики, пока сумма не превысит DRAFT_BYTES_LIMIT.
   const next = {};
-  list.forEach(x => { next[x.key] = x.draft; });
-  try { storageSet(DRAFT_KEY, JSON.stringify({ drafts: next })); } catch (e) { /* ignore */ }
+  let bytes = 0;
+  list.forEach(x => {
+    const d = x.draft;
+    const size = 160 + (d.title || '').length * 2 + (d.body || '').length * 2
+      + (d.tags || []).reduce((s, t) => s + String(t || '').length * 2 + 8, 0);
+    // Первый (самый свежий) черновик сохраняем всегда — даже если он один
+    // больше лимита; остальные добавляем, только пока влезаем в бюджет.
+    if (bytes > 0 && bytes + size > DRAFT_BYTES_LIMIT) return;
+    next[x.key] = d;
+    bytes += size;
+  });
+  try { storageSet(DRAFT_KEY, Object.keys(next).length ? JSON.stringify({ drafts: next }) : ''); } catch (e) { /* ignore */ }
 }
 function clearStoredDraft(noteId) {
   cancelDraftSave();
@@ -4108,30 +4248,46 @@ function saveNote() {
   const names = currentTags.slice();
   if (!title && !body && names.length === 0) { notify('⚠️ Пустая заметка не сохранена'); return; }
   // Конвертируем имена тэгов в id (таблица тэгов), сохраняя порядок и дедупликацию.
+  const tagsBefore = state.tags.length;
   const ids = [];
   names.forEach(name => { const id = ensureTag(name); if (id && !ids.includes(id)) ids.push(id); });
   rebuildTagIndex();
-  invalidateTree();
+  const tagsAdded = state.tags.length !== tagsBefore;
   let savedId = editingId;
   let linksUpdated = 0;
+  let structureChanged = !editingId || tagsAdded;
+  let textChanged = !editingId;
+  let titleChanged = false;
   if (editingId) {
     const n = noteById(editingId);
     if (n) {
       const oldTitle = n.title;
+      const oldTagKey = (n.tagIds || []).join('\u0001');
       // Снимок предыдущей версии — только если текст реально изменился.
       if (n.title !== title || n.body !== body) pushHistory(n);
       // Оценка не считается «обновлением» содержимого — как и на карточке,
       // она не меняет дату и порядок в режиме «Сначала обновлённые».
-      const contentChanged = n.title !== title || n.body !== body || JSON.stringify(n.tagIds || []) !== JSON.stringify(ids);
+      const contentChanged = n.title !== title || n.body !== body || oldTagKey !== ids.join('\u0001');
+      structureChanged = structureChanged || oldTagKey !== ids.join('\u0001');
+      textChanged = textChanged || n.title !== title || n.body !== body;
+      titleChanged = n.title !== title;
       n.title = title; n.body = body; n.tagIds = ids; n.rating = editorRating;
       if (oldTitle !== title) linksUpdated = renameWikiLinks(oldTitle, title, n.id);
       if (contentChanged) n.updated = Date.now();
+      // Кэши поиска/обратных ссылок сбрасываем точечно: структура дерева от
+      // текста не зависит, поэтому полная пересборка дерева не нужна.
+      if (!structureChanged && (textChanged || linksUpdated)) {
+        invalidateNoteCaches(n);
+        if (titleChanged) updateRootNoteLabel(n);
+      }
     }
   } else {
     const created = normalizeNote({ title, body, tagIds: ids, rating: editorRating, created: Date.now(), updated: Date.now() });
     state.notes.push(created);
     savedId = created.id;
   }
+  // Дерево меняется только при появлении/исчезновении заметки или смене тэгов.
+  if (structureChanged) invalidateTree();
   // После сохранения показываем заметку в режиме чтения, а не пустую панель.
   viewingId = savedId || null;
   selectedId = savedId || null;
@@ -4599,6 +4755,7 @@ function serializeData() {
     exported: new Date().toISOString(),
     tags: state.tags,
     notes: state.notes,
+    views: loadViews(),
     backup: lastSavedState
   };
 }
@@ -4646,7 +4803,8 @@ function saveToFile() {
   const handle = fileHandle;
   // payload и снимок состояния готовим синхронно, до первого await: иначе за
   // время записи state успеет измениться и в файл уйдёт другое состояние.
-  const payload = JSON.stringify(serializeData(), null, 2);
+  // Компактный JSON: файл меньше и пишется быстрее (экспорт для людей — MD/TXT).
+  const payload = JSON.stringify(serializeData());
   const savedState = cloneStateSnapshot();
   const task = fileWriteChain.then(() => writeToFileHandle(handle, payload, savedState));
   fileWriteChain = task.catch(() => {}); // ошибки обработаны внутри
@@ -4770,7 +4928,20 @@ async function showDiagnostics() {
   if (p.unsaved > 0) lines.push('Не сохранено в базу: ' + p.unsaved + ' (повтор выполняется автоматически)');
   if (p.recovered) lines.push('Восстановлено при загрузке из: ' + (p.recovered === 'backup' ? 'резервной копии' : 'последнего снимка'));
   lines.push('Привязанный файл: ' + (p.hasHandle ? 'да' + (p.fname ? ' (' + p.fname + ')' : '') : 'нет'));
+  // Размеры по ключам: помогают понять, что раздувает архив (снимки, корзина, черновики).
+  const sizes = [];
+  [['заметки', LS_KEY], ['резерв', LS_KEY + '_backup'], ['снимки', SNAPSHOT_KEY], ['корзина', TRASH_KEY], ['черновики', DRAFT_KEY]]
+    .forEach(([label, key]) => {
+      const raw = storageGet(key);
+      if (raw) sizes.push(label + ': ' + fmtSize(byteLength(raw)));
+    });
+  if (sizes.length) lines.push('Размер данных: ' + sizes.join(', '));
+  const draftCount = Object.keys(readDraftStore().drafts).length;
+  if (draftCount) lines.push('Черновиков редактора: ' + draftCount);
   lines.push('Заметок в текущей сессии: ' + p.inMemory);
+  if (runtimeErrors.length) {
+    lines.push('Ошибки в сеансе: ' + runtimeErrors.length + ' (последняя: ' + runtimeErrors[0].msg + ')');
+  }
   lines.push('');
   if (p.isFile) {
     lines.push('Вы открыли файл двойным кликом (file://). Данные хранятся в');
@@ -4957,7 +5128,9 @@ function mergeTags(fromName, intoName) {
 
 // ---------- Менеджер тэгов (список всех тэгов с действиями) ----------
 function openTagManager() {
-  document.getElementById('tagManagerMask').classList.add('show');
+  const mask = document.getElementById('tagManagerMask');
+  rememberModalFocus(mask);
+  mask.classList.add('show');
   const s = document.getElementById('tmSearch');
   if (s) s.value = '';
   const n = document.getElementById('tmNotice');
@@ -4966,7 +5139,9 @@ function openTagManager() {
   if (s) setTimeout(() => s.focus(), 30);
 }
 function closeTagManager() {
-  document.getElementById('tagManagerMask').classList.remove('show');
+  const mask = document.getElementById('tagManagerMask');
+  mask.classList.remove('show');
+  restoreModalFocus(mask);
 }
 // Отрисовать список тэгов: имя, счётчик заметок, цвет и действия.
 function renderTagManager() {
@@ -5633,6 +5808,56 @@ function exportData() {
   downloadText(payload, 'tag-tree.json', JSON_MIME);
   notify('⬇️ Экспортировано');
 }
+// Разбор Markdown-файла в заметки. Понимает формат нашего экспорта:
+// «# Заголовок», строка тэгов «#работа #проект», «Оценка: ★★★☆☆» и тело.
+// Заголовки внутри блоков кода не считаются разделителями.
+function parseMarkdownImport(text) {
+  const src = String(text || '').replace(/^\uFEFF/, '');
+  const lines = src.split(/\r?\n/);
+  const notes = [];
+  let cur = null;
+  let inFence = false;
+  const tagLine = /^(?:#[^\s#]+)(?:\s+#[^\s#]+)*\s*$/;
+  const ratingLine = /^Оценка:\s*([★☆]+)/;
+  const push = () => {
+    if (!cur) return;
+    const body = cur.bodyLines.join('\n').replace(/\s+$/, '');
+    const title = cur.title.trim();
+    if (title || body || cur.tags.length) {
+      notes.push({ title: title || UNTITLED, body, tags: cur.tags, rating: clampRating(cur.rating) });
+    }
+    cur = null;
+  };
+  for (const line of lines) {
+    if (/^\s*```/.test(line)) inFence = !inFence;
+    const h = !inFence && /^#\s+(.+?)\s*$/.exec(line);
+    if (h) {
+      // Служебный заголовок нашего экспорта в самом начале файла.
+      if (!cur && notes.length === 0 && h[1].trim() === 'TagTree') continue;
+      push();
+      cur = { title: h[1].trim(), bodyLines: [], tags: [], rating: 0 };
+      continue;
+    }
+    if (!cur) {
+      if (!line.trim()) continue;
+      cur = { title: '', bodyLines: [], tags: [], rating: 0 };
+    }
+    const trimmed = line.trim();
+    // Строка тэгов и оценки имеет смысл только сразу после заголовка.
+    if (cur.bodyLines.length === 0 && tagLine.test(trimmed)) {
+      cur.tags = trimmed.split(/\s+/).map(s => s.slice(1)).filter(Boolean);
+      continue;
+    }
+    if (cur.bodyLines.length === 0 && ratingLine.test(trimmed)) {
+      const m = ratingLine.exec(trimmed);
+      cur.rating = (m[1].match(/★/g) || []).length;
+      continue;
+    }
+    cur.bodyLines.push(line);
+  }
+  push();
+  return notes;
+}
 function importData() {
   document.getElementById('fileInput').click();
 }
@@ -5650,7 +5875,15 @@ function importData() {
     reader.onerror = () => { notify('⚠️ Не удалось прочитать файл'); fi.value = ''; };
     reader.onload = async e => {
       try {
-        const data = JSON.parse(e.target.result);
+        let data;
+        try {
+          data = JSON.parse(e.target.result);
+        } catch (jsonErr) {
+          // Не JSON — пробуем Markdown/TXT: заголовки «# …», тэги «#тэг», оценка.
+          const mdNotes = parseMarkdownImport(e.target.result);
+          if (!mdNotes.length) throw jsonErr;
+          data = { version: 2, tags: [], notes: mdNotes };
+        }
         const check = validateImport(data);
         if (!check.ok) {
           notify(check.reason === 'too many notes'
@@ -5668,12 +5901,15 @@ function importData() {
         });
         if (choice === false) { fi.value = ''; return; }
         prepareUndo('импорт');
+        // Сохранённые фильтры теперь едут вместе с архивом.
+        if (Array.isArray(data.views)) saveViews(data.views);
         if (choice === 'extra') {
           const res = mergeImportedData(data);
           resetNavigation();
           saveState();
           saveToFile();
           renderAll();
+          renderViews();
           closeEditor();
           notify('🔗 Объединено: +' + res.added + ', обновлено ' + res.updated + ' · всего ' + res.total);
         } else {
@@ -5682,6 +5918,7 @@ function importData() {
           saveState();
           saveToFile();
           renderAll();
+          renderViews();
           closeEditor();
           notify('⬆️ Импортировано: ' + state.notes.length);
         }
@@ -5742,11 +5979,15 @@ function dialogShow({ title, message, input = false, label = '', value = '', okL
     } else {
       wrap.style.display = 'none';
     }
-    document.getElementById('dialogMask').classList.add('show');
+    const mask = document.getElementById('dialogMask');
+    rememberModalFocus(mask);
+    mask.classList.add('show');
   });
 }
 function dialogClose(result) {
-  document.getElementById('dialogMask').classList.remove('show');
+  const mask = document.getElementById('dialogMask');
+  mask.classList.remove('show');
+  restoreModalFocus(mask);
   if (dialogResolve) { dialogResolve(result); dialogResolve = null; }
 }
 function dialogConfirm(message) {
@@ -5758,6 +5999,24 @@ function dialogPrompt(label, value) {
 // Подключение кнопок диалога выполняется в attachEvents.
 
 // ---------- Shortcut ----------
+// Возврат фокуса после закрытия модалки: запоминаем элемент, с которого её
+// открыли, чтобы клавиатурный пользователь не оказывался в начале страницы.
+let modalFocusStack = [];
+function rememberModalFocus(mask) {
+  const el = document.activeElement;
+  if (!el || el === document.body) return;
+  if (modalFocusStack.some(x => x.mask === mask)) return;
+  modalFocusStack.push({ mask, el });
+}
+function restoreModalFocus(mask) {
+  const idx = modalFocusStack.findIndex(x => x.mask === mask);
+  if (idx < 0) return;
+  const el = modalFocusStack[idx].el;
+  modalFocusStack.splice(idx, 1);
+  if (el && document.contains(el) && el.focus) {
+    try { el.focus(); } catch (e) { /* элемент мог исчезнуть */ }
+  }
+}
 // Удержать Tab внутри верхней открытой модалки (доступность).
 function trapModalFocus(e) {
   if (e.key !== 'Tab') return;
@@ -5777,8 +6036,40 @@ function trapModalFocus(e) {
     first.focus();
   }
 }
+// Справка по клавишам и основным приёмам — по «?» или из палитры.
+function showHelp() {
+  const text = [
+    'Ctrl/Cmd+N — новая заметка',
+    'Ctrl/Cmd+K или Ctrl/Cmd+P — быстрый переход',
+    'Ctrl/Cmd+S — сохранить заметку (в редакторе) или данные',
+    'Ctrl/Cmd+Enter — сохранить заметку из редактора',
+    'Ctrl/Cmd+Z — отменить действие, Ctrl/Cmd+Shift+Z / Ctrl/Cmd+Y — повторить',
+    'Ctrl/Cmd+H — поиск и замена в редакторе',
+    '/ — фокус в поиск, ? — эта справка, Esc — закрыть панель/поиск',
+    '↑/↓/Enter — навигация по дереву, карточкам и палитре',
+    '1–5 — оценка карточки в фокусе, 0 — сбросить',
+    '',
+    'Поиск: #тэг, -тэг, title:, rating:>=4, pinned:true, task:open,',
+    'links:orphan, since:/until:, created:, слово1|слово2.',
+    'В тексте заметки [[Заголовок]] создаёт внутреннюю ссылку.'
+  ].join('\n');
+  dialogShow({ title: 'Справка: клавиши и поиск', message: text });
+}
+
 document.addEventListener('keydown', e => {
   trapModalFocus(e);
+  // Ctrl/Cmd+S — сохранить заметку из редактора или данные из памяти.
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === 's') {
+    e.preventDefault();
+    if (editorOpen) saveNote();
+    else { saveState(); saveToFile(); notify('💾 Сохранено'); }
+    return;
+  }
+  // Ctrl/Cmd+Enter — сохранить открытую заметку.
+  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+    if (editorOpen) { e.preventDefault(); saveNote(); }
+    return;
+  }
   // Ctrl/Cmd+K — единый быстрый переход: папки/тэги, заметки, команды.
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault();
@@ -5801,6 +6092,16 @@ document.addEventListener('keydown', e => {
       const search = document.getElementById('search');
       search.focus();
       search.select();
+      return;
+    }
+  }
+  // «?» — справка по клавишам и синтаксису поиска.
+  if (e.key === '?' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    const t = e.target;
+    const typing = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
+    if (!typing && !editorOpen) {
+      e.preventDefault();
+      showHelp();
       return;
     }
   }
@@ -5875,8 +6176,24 @@ function renderFatal(message) {
   el.appendChild(msg);
   box.appendChild(el);
 }
+// Журнал ошибок сеанса: асинхронные сбои раньше терялись молча. Храним
+// последние 10 записей и показываем их в диагностике.
+const RUNTIME_ERRORS_MAX = 10;
+let runtimeErrors = [];
+function recordRuntimeError(kind, err) {
+  const msg = err && err.message ? String(err.message) : String(err || 'неизвестная');
+  runtimeErrors.unshift({ kind, msg, ts: Date.now() });
+  if (runtimeErrors.length > RUNTIME_ERRORS_MAX) runtimeErrors.length = RUNTIME_ERRORS_MAX;
+  return msg;
+}
 window.addEventListener('error', function (ev) {
+  recordRuntimeError('error', ev && (ev.error || ev.message));
   renderFatal('Ошибка: ' + (ev && ev.message ? ev.message : 'неизвестная'));
+});
+window.addEventListener('unhandledrejection', function (ev) {
+  const reason = ev && ev.reason;
+  const msg = recordRuntimeError('promise', reason);
+  notify('⚠️ Необработанная ошибка: ' + msg);
 });
 // Единая точка подключения обработчиков событий (вместо инлайн-атрибутов).
 function attachEvents() {
@@ -5942,8 +6259,7 @@ function attachNotesEvents($) {
     if (moreBtn) {
       e.preventDefault();
       e.stopPropagation();
-      notesRenderLimit += NOTES_CHUNK;
-      renderNotes();
+      loadMoreNotes();
       return;
     }
     // Звезда на карточке ставит оценку и не открывает просмотр заметки.
@@ -6004,6 +6320,7 @@ function attachNotesEvents($) {
     if (card) openEditor(card.dataset.noteId);
   });
   // Панель массовых операций.
+  $('bulkAllBtn').addEventListener('click', () => bulkSelectAll());
   $('bulkClearBtn').addEventListener('click', () => clearBulkSelection());
   $('bulkTagBtn').addEventListener('click', () => bulkAddTags());
   $('bulkMoveBtn').addEventListener('click', () => bulkMove());
@@ -6296,9 +6613,10 @@ if (window) {
     isValidData, validateImport, normalizeNote, renderMarkdown, highlightElement, parseLocalDate, byteLength,
     clampRating, starsHtml, ratingText, taskStats, orphanNotes, renameWikiLinks,
     searchRelevance,
-    renderAll, renderNotes, renderBreadcrumbs, notesInPath, onSearch, resetNavigation, closeEditor, resetNotesRenderChunk,
-    loadMoreNotes, mergeImportedData, reloadFromStorage, textDiffPreview, dataDiffSummary,
-    updateBulkBar, refreshBulkCards, clearBulkSelection, toggleBulkSelection, bulkSelectRange, bulkSelectedNotes,
+    renderAll, renderNotes, renderBreadcrumbs, notesInPath, notesForPath, onSearch, resetNavigation, closeEditor, resetNotesRenderChunk,
+    loadMoreNotes, appendMoreNotes, loadAllNotesForEnd, noteCardHtml, notesCardsHtml, mergeImportedData, reloadFromStorage, textDiffPreview, dataDiffSummary,
+    showHelp, recordRuntimeError, get runtimeErrors() { return runtimeErrors; },
+    updateBulkBar, refreshBulkCards, clearBulkSelection, toggleBulkSelection, bulkSelectRange, bulkSelectedNotes, bulkSelectAll,
     bulkAddTags, bulkMove, bulkSetRating, bulkTogglePin, bulkDelete,
     sortNotes, tagCount, tagColor, setTagColor, moveNoteToTag, pushHistory, restoreHistory,
     setSortMode, sortMenu, printNotes, parseQuery, tokenizeQuery, tagToken, matchesSearch, matchesSearchScoped, fuzzyMatch,
@@ -6306,19 +6624,20 @@ if (window) {
     setMdMode, applyMdFormat, updateMdPreview, updateMdWordCount, mdMode,
     updateSearchSuggest, applySearchSuggest, getParsedQuery, tagCounts, notesInFolder, submenuFor,
     closeSidebar, toggleSidebar, storageProbe, showDiagnostics, restoreFromBackup,
-    storageGet, storageSet, storageInit, storageClearMemory, flushIdbWrites, idbIdle, fmtSize,
-    flushDeferredSettings, flushStateSave, clearStoredDraft, scheduleDraftSave, flushDraftSave, readStoredDraft,
+    storageGet, storageSet, storageInit, storageClearMemory, flushIdbWrites, idbIdle, fmtSize, serializeData,
+    HEAVY_KEYS, DRAFT_KEY, DRAFT_BYTES_LIMIT,
+    flushDeferredSettings, flushStateSave, clearStoredDraft, scheduleDraftSave, flushDraftSave, readStoredDraft, readDraftStore, writeDraftStore,
     parseStoredState, relieveQuota, withTimeout, loadState, saveState,
     mergeTags, openTagManager, closeTagManager, renderTagManager, tagManagerRename, tagManagerMerge, tagManagerDelete, tagManagerColor,
     updateTagSuggest, hideTagSuggest, applyTagSuggest,
     togglePin, expandAllTree, collapseAllTree, initTreeCollapse, notesKeyNav, treeKeyNav, editorDirty, requestCloseEditor,
     removeOrphanTags, findSimilarTagNames, highlightSimilarTags,
-    openPalette, closePalette, renderPalette, paletteKey, paletteCommands,
+    openPalette, closePalette, renderPalette, paletteKey, paletteCommands, dialogShow, dialogClose,
     loadSnapshots, saveSnapshots, maybeSnapshot, restoreSnapshot, snapshotMenu, checkFileConflict,
     loadTrash, saveTrash, moveToTrash, restoreFromTrash, emptyTrash, trashMenu,
     prepareUndo, undoLastAction, redoLastAction, clearUndoHistory,
     openFindBar, closeFindBar, mdFindNext, mdReplaceOne, mdReplaceAll, updateMdToc,
-    humanDate, duplicateNote, exportFound, exportMdText, exportTxtText, rateNoteFromCard, setNoteRating, makeSnapshotNow, toggleTaskLine, toggleNoteTask, ratingFacetToken, toggleRatingFacet, saveLastView, restoreLastView,
+    humanDate, duplicateNote, exportFound, exportMdText, exportTxtText, parseMarkdownImport, rateNoteFromCard, setNoteRating, makeSnapshotNow, toggleTaskLine, toggleNoteTask, ratingFacetToken, toggleRatingFacet, saveLastView, restoreLastView,
     openEditor, saveNote, deleteNote,
     openNoteView, closeNoteView, renderNoteView, goToPath, openWikiLink, noteByTitle, noteBacklinks, wikiLinkTitles, noteById,
     tagsLowerOf, applyTreeState, safeCssColor, scheduleMdPreview, cancelMdPreview,
@@ -6336,7 +6655,7 @@ if (window) {
     get notesTotalCount() { return notesTotalCount; },
     get notesRenderLimit() { return notesRenderLimit; },
     get bulkSelected() { return [...bulkSelected]; },
-    renderFacets, cycleFacet, toggleFacets, addView, deleteView, applyView, loadViews, resetFacets,
+    renderFacets, cycleFacet, toggleFacets, addView, deleteView, applyView, loadViews, saveViews, resetFacets,
     get collapsed() { return collapsed; },
     get sortMode() { return sortMode; }
   };
