@@ -432,6 +432,8 @@
 
   .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%) translateY(20px); background: var(--text); color: var(--bg); padding: 10px 18px; border-radius: 10px; font-size: 13px; font-weight: 600; opacity: 0; transition: all .25s; z-index: 60; box-shadow: var(--shadow); max-width: min(92vw, 560px); text-align: center; }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  /* Визуально скрытый, но доступный скринридерам текст (живой статус поиска). */
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
   /* Контекстное меню */
   .ctx-menu {
@@ -741,6 +743,7 @@
 </main>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
+<div id="liveStatus" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
 <input type="file" id="fileInput" accept=".json,.md,.markdown,.txt" style="display:none">
 
 <!-- Менеджер тэгов: список всех тэгов с действиями -->
@@ -1555,7 +1558,8 @@ async function loadState() {
     try { storageSet(LS_KEY + '_backup', JSON.stringify({ version: 2, tags: state.tags, notes: state.notes })); } catch (e) {}
     maybeSnapshot(); // версионный снимок при изменении состава
   }
-  state.theme = storageGet(THEME_KEY) || 'light';
+  const savedTheme = storageGet(THEME_KEY);
+  state.theme = (savedTheme === 'dark' || savedTheme === 'auto') ? savedTheme : 'light';
   const savedSort = storageGet(SORT_KEY);
   if (savedSort === 'created' || savedSort === 'title' || savedSort === 'updated') sortMode = savedSort;
   renderSortLabel();
@@ -3202,6 +3206,87 @@ function safeCssColor(c) {
   if (/^[a-z]{3,20}$/i.test(s)) return s;
   return '';
 }
+// ---------- Контраст текста на цветных тэгах ----------
+// Плашки тэгов рисуются выбранным пользователем цветом. Белый текст на светлом
+// (жёлтый, лайм, голубой) не читается, поэтому цвет текста выбираем по
+// относительной яркости фона: что даёт больший контраст — тёмный или белый.
+const NAMED_COLORS = {
+  black: [0, 0, 0], white: [255, 255, 255], red: [255, 0, 0], lime: [0, 255, 0],
+  blue: [0, 0, 255], yellow: [255, 255, 0], cyan: [0, 255, 255], aqua: [0, 255, 255],
+  magenta: [255, 0, 255], fuchsia: [255, 0, 255], silver: [192, 192, 192],
+  gray: [128, 128, 128], grey: [128, 128, 128], maroon: [128, 0, 0], olive: [128, 128, 0],
+  green: [0, 128, 0], purple: [128, 0, 128], teal: [0, 128, 128], navy: [0, 0, 128],
+  orange: [255, 165, 0], gold: [255, 215, 0], pink: [255, 192, 203],
+  brown: [165, 42, 42], violet: [238, 130, 238], indigo: [75, 0, 130],
+  tomato: [255, 99, 71], salmon: [250, 128, 114], khaki: [240, 230, 140],
+  beige: [245, 245, 220], ivory: [255, 255, 240], lavender: [230, 230, 250],
+  skyblue: [135, 206, 235], steelblue: [70, 130, 180], crimson: [220, 20, 60]
+};
+function clampByte(v) { return Math.max(0, Math.min(255, Math.round(v))); }
+function hslToRgb(h, s, l) {
+  const hh = ((h % 360) + 360) % 360 / 360;
+  const ss = Math.max(0, Math.min(1, s)), ll = Math.max(0, Math.min(1, l));
+  if (ss === 0) { const v = clampByte(ll * 255); return [v, v, v]; }
+  const q = ll < 0.5 ? ll * (1 + ss) : ll + ss - ll * ss;
+  const p = 2 * ll - q;
+  const hue = t => {
+    let x = t;
+    if (x < 0) x += 1;
+    if (x > 1) x -= 1;
+    if (x < 1 / 6) return p + (q - p) * 6 * x;
+    if (x < 1 / 2) return q;
+    if (x < 2 / 3) return p + (q - p) * (2 / 3 - x) * 6;
+    return p;
+  };
+  return [clampByte(hue(hh + 1 / 3) * 255), clampByte(hue(hh) * 255), clampByte(hue(hh - 1 / 3) * 255)];
+}
+// Разобрать hex/rgb()/hsl()/имя в [r, g, b]; null — если понять не удалось.
+function colorToRgb(c) {
+  const s = String(c || '').trim().toLowerCase();
+  if (!s) return null;
+  if (s[0] === '#') {
+    const h = s.slice(1);
+    if (!/^[0-9a-f]+$/.test(h)) return null;
+    if (h.length === 3 || h.length === 4) {
+      return [parseInt(h[0] + h[0], 16), parseInt(h[1] + h[1], 16), parseInt(h[2] + h[2], 16)];
+    }
+    if (h.length === 6 || h.length === 8) {
+      return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+    }
+    return null;
+  }
+  const fn = /^(rgba?|hsla?)\(([^)]+)\)$/.exec(s);
+  if (fn) {
+    const nums = fn[2].split(/[\s,/]+/).filter(Boolean);
+    if (fn[1].startsWith('rgb')) {
+      if (nums.length < 3) return null;
+      const ch = nums.slice(0, 3).map(v => v.endsWith('%') ? clampByte(parseFloat(v) * 2.55) : clampByte(parseFloat(v)));
+      return ch.some(v => isNaN(v)) ? null : ch;
+    }
+    if (nums.length < 3) return null;
+    const h = parseFloat(nums[0]), sat = parseFloat(nums[1]) / 100, lig = parseFloat(nums[2]) / 100;
+    if (isNaN(h) || isNaN(sat) || isNaN(lig)) return null;
+    return hslToRgb(h, sat, lig);
+  }
+  return NAMED_COLORS[s] || null;
+}
+// Относительная яркость по WCAG (sRGB).
+function relativeLuminance(rgb) {
+  const lin = rgb.map(v => {
+    const x = v / 255;
+    return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+}
+// Цвет текста для плашки: тёмный, если он контрастнее белого, иначе белый.
+function tagTextColor(background) {
+  const rgb = colorToRgb(background);
+  if (!rgb) return '#fff';
+  const lum = relativeLuminance(rgb);
+  const dark = (lum + 0.05) / 0.05;      // контраст с #000
+  const white = 1.05 / (lum + 0.05);     // контраст с #fff
+  return dark >= white ? '#111827' : '#fff';
+}
 // Короткое превью для карточки: таблицы выкидываем (в 96px они нечитаемы),
 // лишние пустые строки схлопываем, длину ограничиваем. В результатах поиска
 // сдвигаем окно к первому совпадению, чтобы найденное не осталось за кадром.
@@ -3424,6 +3509,11 @@ async function bulkDelete() {
   if (!ok) return;
   prepareUndo('удаление выбранных заметок');
   const ids = new Set(list.map(n => n.id));
+  // Куда вернуть фокус: первая оставшаяся заметка на месте удалённого блока.
+  const before = (notesCurrentList || []).slice();
+  const firstIdx = Math.max(0, before.findIndex(n => ids.has(n.id)));
+  const remaining = before.filter(n => !ids.has(n.id));
+  const focusId = remaining.length ? remaining[Math.min(firstIdx, remaining.length - 1)].id : null;
   list.forEach(n => moveToTrash(n));
   state.notes = state.notes.filter(n => !ids.has(n.id));
   if (viewingId && ids.has(viewingId)) viewingId = null;
@@ -3433,6 +3523,7 @@ async function bulkDelete() {
   saveToFile();
   clearBulkSelection();
   renderAll();
+  focusNoteOrFallback(focusId);
   notify('🗑 Удалено заметок: ' + list.length);
 }
 // Сбросить порционную отрисовку (полная замена данных, тесты).
@@ -3466,7 +3557,7 @@ function noteCardHtml(n) {
     : '';
   const tagsHtml = tagList.map(t => {
     const c = safeCssColor(tagColor(t));
-    const style = c ? ` style="background:${c};color:#fff"` : '';
+    const style = c ? ` style="background:${c};color:${tagTextColor(c)}"` : '';
     const title = escapeHtml('Открыть папку тэга «' + t + '»');
     return `<span class="tag clk" data-tag="${escapeHtml(t)}" title="${title}"${style}>${escapeHtml(t)}</span>`;
   }).join('');
@@ -3932,6 +4023,8 @@ function treeKeyNav(e) {
   }
 }
 
+// Текст счётчика результатов последнего объявления для скринридеров.
+let lastA11yStatus = '';
 function renderBreadcrumbs() {
   const el = document.getElementById('breadcrumbs');
   el.innerHTML = '';
@@ -3963,6 +4056,13 @@ function renderBreadcrumbs() {
     ? (count + ' найдено' + (searchScope === 'folder' ? ' в папке' : ''))
     : (count + ' заметок');
   el.appendChild(cnt);
+  // Живой статус: при поиске/смене папки скринридер сообщает новое число
+  // результатов. Объявляем только при изменении, чтобы не повторять одно и то же.
+  const live = document.getElementById('liveStatus');
+  if (live && cnt.textContent !== lastA11yStatus) {
+    lastA11yStatus = cnt.textContent;
+    live.textContent = lastA11yStatus;
+  }
 }
 
 // Перерисовать интерфейс. Флаги позволяют не пересобирать лишние части:
@@ -4026,6 +4126,28 @@ function findNoteCard(id) {
   if (idx < 0) return null;
   virtualEnsureVisible(idx, false);
   return virtualFindRendered(id);
+}
+// Соседняя заметка в текущем списке — куда вернуть фокус после удаления.
+// Берём следующую, иначе предыдущую.
+function neighborNoteId(id) {
+  const list = notesCurrentList || [];
+  const idx = list.findIndex(n => n.id === id);
+  if (idx === -1) return null;
+  const next = list[idx + 1] || list[idx - 1];
+  return next ? next.id : null;
+}
+// Вернуть фокус на карточку заметки, а если её нет — на «новую заметку» или
+// в поиск. Так клавиатурный пользователь не оказывается в начале страницы.
+function focusNoteOrFallback(id) {
+  if (id) {
+    const card = findNoteCard(id);
+    if (card && card.focus) { try { card.focus(); return true; } catch (e) { /* ignore */ } }
+  }
+  const fallback = document.getElementById('newNoteBtn') || document.getElementById('search');
+  if (fallback && fallback.focus) {
+    try { fallback.focus(); return true; } catch (e) { /* ignore */ }
+  }
+  return false;
 }
 // Сбросить ширину списка, зафиксированную при открытии просмотра.
 function resetNoteListWidth() {
@@ -4171,7 +4293,7 @@ function renderNoteView() {
   const cre = humanDate(n.created || n.updated);
   const tagsHtml = tagsOf(n).map(t => {
     const c = safeCssColor(tagColor(t));
-    const style = c ? ` style="background:${c};color:#fff"` : '';
+    const style = c ? ` style="background:${c};color:${tagTextColor(c)}"` : '';
     return `<span class="tag clk" data-tag="${escapeHtml(t)}"${style} title="Открыть папку тэга">${escapeHtml(t)}</span>`;
   }).join('');
   const bodyHtml = (n.body && n.body.trim())
@@ -5034,6 +5156,8 @@ async function deleteNote(id) {
   prepareUndo('удаление заметки');
   const victim = noteById(targetId);
   if (victim) moveToTrash(victim);
+  // Сосед определяем до удаления: после renderAll список уже другой.
+  const nextFocusId = neighborNoteId(targetId);
   state.notes = state.notes.filter(x => x.id !== targetId);
   if (editingId === targetId) {
     editingId = null;
@@ -5046,6 +5170,7 @@ async function deleteNote(id) {
   saveState();
   saveToFile();
   renderAll();
+  focusNoteOrFallback(nextFocusId);
   notify('🗑️ Заметка удалена');
 }
 
@@ -5495,14 +5620,42 @@ async function promptSaveView() {
 
 // ---------- Theme ----------
 function toggleTheme() {
-  state.theme = state.theme === 'dark' ? 'light' : 'dark';
+  // Три состояния: светлая → тёмная → авто (по системной настройке) → светлая.
+  state.theme = state.theme === 'light' ? 'dark' : state.theme === 'dark' ? 'auto' : 'light';
   applyTheme();
   saveTheme();
+  notify('🎨 Тема: ' + (state.theme === 'auto' ? 'авто (по системе)'
+    : state.theme === 'dark' ? 'тёмная' : 'светлая'));
+}
+// Системная тема — нужна для режима «авто».
+let themeMedia = null;
+function systemPrefersDark() {
+  return !!(themeMedia && themeMedia.matches);
+}
+// Фактическая тема: при «авто» берём системную, иначе сохранённый выбор.
+function effectiveTheme() {
+  if (state.theme === 'auto') return systemPrefersDark() ? 'dark' : 'light';
+  return state.theme === 'dark' ? 'dark' : 'light';
 }
 function applyTheme() {
-  document.documentElement.setAttribute('data-theme', state.theme);
+  const eff = effectiveTheme();
+  document.documentElement.setAttribute('data-theme', eff);
   const btn = document.getElementById('themeBtn');
-  if (btn) btn.textContent = state.theme === 'dark' ? '☀️' : '🌙';
+  if (btn) {
+    const label = state.theme === 'auto' ? 'авто (по системе)'
+      : (eff === 'dark' ? 'тёмная' : 'светлая');
+    btn.textContent = state.theme === 'auto' ? '🌗' : (eff === 'dark' ? '☀️' : '🌙');
+    btn.title = 'Тема: ' + label + '. Нажмите, чтобы сменить';
+    btn.setAttribute('aria-label', 'Тема: ' + label + '. Переключить');
+  }
+  // Один раз подписываемся на смену системной темы: в режиме «авто» интерфейс
+  // должен перекрашиваться без перезагрузки страницы.
+  if (!themeMedia && typeof window.matchMedia === 'function') {
+    themeMedia = window.matchMedia('(prefers-color-scheme: dark)');
+    const onChange = () => { if (state.theme === 'auto') applyTheme(); };
+    if (themeMedia.addEventListener) themeMedia.addEventListener('change', onChange);
+    else if (themeMedia.addListener) themeMedia.addListener(onChange);
+  }
 }
 
 // ---------- File System Access API (локальный файл) ----------
@@ -7627,6 +7780,8 @@ if (window) {
     openEditor, saveNote, deleteNote,
     openNoteView, closeNoteView, renderNoteView, goToPath, openWikiLink, noteByTitle, noteBacklinks, wikiLinkTitles, noteById,
     tagsLowerOf, applyTreeState, safeCssColor, scheduleMdPreview, cancelMdPreview,
+    tagTextColor, colorToRgb, relativeLuminance, effectiveTheme, neighborNoteId, focusNoteOrFallback,
+    toggleTheme, applyTheme,
     get selectedId() { return selectedId; },
     get viewingId() { return viewingId; },
     get editingId() { return editingId; },
