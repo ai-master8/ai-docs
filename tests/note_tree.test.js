@@ -683,6 +683,161 @@ describe('Тэги новой заметки и рейтинг', () => {
   });
 });
 
+describe('Оценка: поиск, клавиатура и меню', () => {
+  test('parseQuery понимает rating: с операторами и none', () => {
+    deepEqual(app.parseQuery('rating:>=4').rating, [{ op: '>=', value: 4 }]);
+    deepEqual(app.parseQuery('rating:3').rating, [{ op: '=', value: 3 }]);
+    deepEqual(app.parseQuery('rating:none').rating, [{ op: '=', value: 0 }]);
+    deepEqual(app.parseQuery('rating:9').rating, [{ op: '=', value: 5 }], 'значение ограничивается 0–5');
+    deepEqual(app.parseQuery('rating:abc').rating, [], 'невалидный токен не ломает разбор');
+  });
+
+  test('matchesSearch фильтрует по рейтингу', () => {
+    seed([], [
+      { id: 'n1', title: 'Пять', tagIds: [], rating: 5 },
+      { id: 'n2', title: 'Три', tagIds: [], rating: 3 },
+      { id: 'n3', title: 'Ноль', tagIds: [] }
+    ]);
+    const ids = (q) => { app.onSearch(q); return app.searchScopeNotes().map(n => n.id); };
+    deepEqual(ids('rating:>=4'), ['n1']);
+    deepEqual(ids('rating:<3'), ['n3']);
+    deepEqual(ids('rating:0'), ['n3']);
+    deepEqual(ids('rating:none'), ['n3']);
+    deepEqual(ids('rating:>=2 rating:<=3'), ['n2'], 'условия складываются по «И»');
+  });
+
+  test('клавиши 1–5 и 0 ставят и сбрасывают оценку на карточке в фокусе', () => {
+    seed([], [{ id: 'n1', title: 'Заметка', tagIds: [] }]);
+    app.renderAll();
+    const card = document.querySelector('#notes .note-card');
+    card.focus();
+    card.dispatchEvent(new KeyboardEvent('keydown', { key: '4', bubbles: true }));
+    strictEqual(app.state.notes[0].rating, 4);
+    // Список мог пересобраться (если включена сортировка по оценке) —
+    // берём актуальную карточку, на которой остался фокус.
+    const after = document.querySelector('#notes .note-card');
+    ok(after.contains(document.activeElement) || after === document.activeElement, 'фокус остался на карточке');
+    after.dispatchEvent(new KeyboardEvent('keydown', { key: '0', bubbles: true }));
+    strictEqual(app.state.notes[0].rating, 0);
+    strictEqual(app.viewingId, null, 'просмотр не открылся');
+  });
+
+  test('в контекстном меню заметки есть подменю оценки', () => {
+    seed([], [{ id: 'n1', title: 'Заметка', tagIds: [] }]);
+    app.renderAll();
+    const card = document.querySelector('#notes .note-card');
+    card.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, clientX: 10, clientY: 10 }));
+    const ratingItem = [...document.querySelectorAll('#ctxMenu .ctx-item')].find(el => el.textContent.indexOf('★ Оценка') === 0);
+    ok(ratingItem, 'пункт «★ Оценка» есть');
+    ratingItem.click();
+    const five = [...document.querySelectorAll('#ctxMenu .ctx-item')].find(el => el.textContent.indexOf('★★★★★') === 0);
+    ok(five, 'подменю с пятью звёздами открыто');
+    five.click();
+    strictEqual(app.state.notes[0].rating, 5);
+  });
+
+  test('печать рендерит Markdown: списки и выделение сохраняются', () => {
+    seed([], [{ id: 'n1', title: 'Заметка', body: '- пункт\n\n**жирный**', tagIds: [] }]);
+    const orig = window.print;
+    window.print = () => {};
+    try { app.printNotes(app.state.notes); } finally { window.print = orig; }
+    const body = document.querySelector('#printArea .print-body');
+    ok(body.querySelector('ul.md-ul li'), 'список отрендерен');
+    ok(body.querySelector('strong'), 'жирный текст сохранён');
+    strictEqual(body.textContent.includes('**'), false, 'разметка не остаётся текстом');
+  });
+
+  test('сохранение из редактора меняет updated только при правке содержимого', () => {
+    seed([], [{ id: 'n1', title: 'Заметка', body: '', tagIds: [], rating: 0, updated: 1000 }]);
+    app.renderAll();
+    app.openEditor('n1');
+    document.querySelectorAll('#fRating .star-btn')[4].click();
+    app.saveNote();
+    strictEqual(app.state.notes[0].updated, 1000, 'оценка не обновляет дату');
+    app.openEditor('n1');
+    document.getElementById('fBody').value = 'новый текст';
+    app.saveNote();
+    ok(app.state.notes[0].updated > 1000, 'правка текста обновляет дату');
+  });
+});
+
+describe('Задачи, фасеты и представления', () => {
+  test('клик по задаче в просмотре переключает её и сохраняет заметку', () => {
+    seed([], [{ id: 'n1', title: 'Дела', body: '- [ ] один\n- [ ] два', tagIds: [], updated: 500 }]);
+    app.renderAll();
+    app.openNoteView('n1');
+    const items = document.querySelectorAll('#noteView .nv-body .md-ul.todo li[data-task]');
+    strictEqual(items.length, 2);
+    strictEqual(items[0].getAttribute('role'), 'checkbox');
+    strictEqual(items[0].getAttribute('aria-checked'), 'false');
+    items[0].click();
+    strictEqual(app.state.notes[0].body, '- [x] один\n- [ ] два');
+    ok(app.state.notes[0].updated > 500, 'дата обновлена');
+    strictEqual(app.state.notes[0].history.length, 1, 'прежняя версия в истории');
+    strictEqual(document.querySelectorAll('#noteView .md-ul.todo li[data-task]')[0].getAttribute('aria-checked'), 'true');
+  });
+
+  test('задачу можно переключить с клавиатуры (Space)', () => {
+    seed([], [{ id: 'n1', title: 'Дела', body: '- [x] готово', tagIds: [] }]);
+    app.renderAll();
+    app.openNoteView('n1');
+    const item = document.querySelector('#noteView .nv-body .md-ul.todo li[data-task]');
+    item.dispatchEvent(new KeyboardEvent('keydown', { key: ' ', bubbles: true }));
+    strictEqual(app.state.notes[0].body, '- [ ] готово');
+  });
+
+  test('чип оценки в фасетах включает и снимает фильтр', () => {
+    seed([], [
+      { id: 'n1', title: 'Пять', tagIds: [], rating: 5 },
+      { id: 'n2', title: 'Два', tagIds: [], rating: 2 }
+    ]);
+    app.renderFacets();
+    const chip = [...document.querySelectorAll('#facetsBody .facets-rating .facet')].find(el => el.textContent === '★ 4+');
+    ok(chip, 'чип «★ 4+» есть');
+    chip.click();
+    strictEqual(app.searchQuery, 'rating:>=4');
+    deepEqual(app.searchScopeNotes().map(n => n.id), ['n1']);
+    const again = [...document.querySelectorAll('#facetsBody .facets-rating .facet')].find(el => el.textContent === '★ 4+');
+    again.click();
+    strictEqual(app.searchQuery, '', 'повторный клик снимает фильтр');
+  });
+
+  test('pinned:true в поиске оставляет только закреплённые', () => {
+    seed([], [
+      { id: 'n1', title: 'Важная', tagIds: [], pinned: true },
+      { id: 'n2', title: 'Обычная', tagIds: [] }
+    ]);
+    strictEqual(app.parseQuery('pinned:true').pinned, true);
+    app.onSearch('pinned:true');
+    deepEqual(app.searchScopeNotes().map(n => n.id), ['n1']);
+    app.onSearch('pinned:false');
+    deepEqual(app.searchScopeNotes().map(n => n.id), ['n2']);
+  });
+
+  test('представление восстанавливает сортировку и область поиска', () => {
+    seed([{ id: 't1', name: 'a' }], [{ id: 'n1', title: 'Текст', body: 'текст', tagIds: ['t1'] }]);
+    app.currentPath = ['a'];
+    app.addView('Мой фильтр', 'текст', 'rating', 'folder');
+    app.setSortMode('title');
+    app.setSearchScope('all');
+    const view = app.loadViews()[0];
+    strictEqual(view.sort, 'rating');
+    strictEqual(view.scope, 'folder');
+    app.applyView(view);
+    strictEqual(app.sortMode, 'rating', 'сортировка восстановлена');
+    strictEqual(app.searchScope, 'folder', 'область восстановлена');
+    strictEqual(app.searchQuery, 'текст');
+  });
+
+  test('старый формат представления (строка) продолжает работать', () => {
+    seed([], [{ id: 'n1', title: 'Текст', body: 'текст', tagIds: [] }]);
+    app.applyView('текст');
+    strictEqual(app.searchQuery, 'текст');
+    strictEqual(app.searchScope, 'all');
+    strictEqual(app.searchScopeNotes().length, 1);
+  });
+});
+
 describe('Сортировка, экспорт и снимки', () => {
   test('сортировка по оценке: высокие выше, без оценки — в конце', () => {
     const notes = [

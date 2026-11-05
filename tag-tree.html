@@ -128,6 +128,8 @@
   .facets.open .facets-body { display: flex; }
   .facet { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 20px; border: 1px solid var(--border); background: var(--panel-2); font-size: 12px; cursor: pointer; }
   .facet .cnt { color: var(--muted); font-size: 10px; }
+  .facets-rating { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; margin-bottom: 2px; }
+  .facets-rating .facet.rating { font-weight: 600; }
   .facet:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .facets-hint { display: none; color: var(--muted); font-size: 11px; line-height: 1.35; padding: 0 2px 4px; }
   .facets.open .facets-hint { display: block; }
@@ -317,6 +319,10 @@
   #mdPreview .md-code, #noteView .md-code { background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 2px 6px; font-family: 'Consolas', 'Menlo', monospace; font-size: 13px; white-space: pre-wrap; word-break: break-word; }
   #mdPreview .md-inline, #noteView .md-inline { background: var(--panel-2); border-radius: 4px; padding: 1px 5px; font-family: 'Consolas', 'Menlo', monospace; font-size: 13px; }
   #mdPreview .md-hr, #noteView .md-hr { border: 0; border-top: 2px solid var(--border); margin: 10px 0; }
+  /* Кликабельные задачи в просмотре заметки */
+  #noteView .nv-body .md-ul.todo li[data-task] { cursor: pointer; border-radius: 5px; padding: 1px 4px; margin-left: -4px; transition: background .12s; }
+  #noteView .nv-body .md-ul.todo li[data-task]:hover { background: var(--panel-2); }
+  #noteView .nv-body .md-ul.todo li[data-task]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   /* Широкие таблицы прокручиваются внутри своего блока, а не растягивают страницу. */
   .md-table-wrap { max-width: 100%; overflow-x: auto; margin: 8px 0; -webkit-overflow-scrolling: touch; overscroll-behavior-x: contain; }
   #mdPreview .md-table, #noteView .md-table { border-collapse: collapse; margin: 0; font-size: 13px; }
@@ -518,7 +524,24 @@
     #printArea .print-note h2 { margin: 0 0 4px; font-size: 18px; }
     #printArea .print-tags { font-size: 12px; color: #555; margin-bottom: 8px; }
     #printArea .print-rating { font-size: 13px; color: #b7791f; margin-bottom: 8px; letter-spacing: 1px; }
-    #printArea .print-body { white-space: pre-wrap; line-height: 1.5; }
+    #printArea .print-body { line-height: 1.5; }
+    #printArea .print-body .md-h1, #printArea .print-body .md-h2, #printArea .print-body .md-h3 { margin: 10px 0 4px; font-weight: 700; }
+    #printArea .print-body .md-h1 { font-size: 18px; }
+    #printArea .print-body .md-h2 { font-size: 16px; }
+    #printArea .print-body .md-h3 { font-size: 14px; }
+    #printArea .print-body .md-ul { padding-left: 20px; margin: 4px 0; }
+    #printArea .print-body .md-ul li { margin: 2px 0; }
+    #printArea .print-body .md-ul.todo { list-style: none; padding-left: 2px; }
+    #printArea .print-body .md-ul.todo li::before { content: attr(data-box); display: inline-block; width: 14px; margin-right: 4px; }
+    #printArea .print-body .md-quote { border-left: 3px solid #999; padding: 2px 10px; margin: 6px 0; color: #444; }
+    #printArea .print-body .md-code { background: #f4f4f4; border: 1px solid #ddd; border-radius: 4px; padding: 2px 6px; font-family: 'Consolas', 'Menlo', monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+    #printArea .print-body .md-hr { border: 0; border-top: 1px solid #999; margin: 10px 0; }
+    #printArea .print-body .md-table { border-collapse: collapse; font-size: 12px; }
+    #printArea .print-body .md-table th, #printArea .print-body .md-table td { border: 1px solid #999; padding: 4px 8px; text-align: left; }
+    #printArea .print-body .md-table th { background: #eee; font-weight: 600; }
+    #printArea .print-body .md-gap { height: 0; }
+    #printArea .print-body strong { font-weight: 700; }
+    #printArea .print-body del { text-decoration: line-through; }
     #printArea a { color: #000; text-decoration: none; }
   }
 </style>
@@ -546,7 +569,7 @@
   <aside class="sidebar" id="sidebar">
     <div class="search">
       <div class="search-box">
-        <input id="search" type="text" placeholder="Поиск: слова, #тэг, -тэг, title:… (/)" title="Быстрый фокус: /" aria-label="Поиск по заметкам">
+        <input id="search" type="text" placeholder="Поиск: слова, #тэг, rating:>=4… (/)" title="Быстрый фокус: /. Фильтры: #тэг, -тэг, title:, rating:>=4, since:/until:" aria-label="Поиск по заметкам">
         <button type="button" class="search-clear" id="searchClear" title="Очистить поиск (Esc)" aria-label="Очистить поиск" hidden>✕</button>
       </div>
       <div class="search-scope" id="searchScope" role="group" aria-label="Область поиска">
@@ -1168,11 +1191,11 @@ function starsHtml(rating, interactive) {
   for (let i = 1; i <= 5; i++) {
     const cls = 'star' + (i <= r ? ' on' : '') + (interactive ? ' hit' : '');
     const data = interactive ? ` data-rating="${i}"` : '';
-    stars += `<span class="${cls}"${data}>${i <= r ? '★' : '☆'}</span>`;
+    stars += `<span class="${cls}"${data} aria-hidden="true">${i <= r ? '★' : '☆'}</span>`;
   }
   if (interactive) {
-    const hint = r ? 'Рейтинг: ' + r + ' из 5. Нажмите звезду, чтобы изменить, или ту же — чтобы сбросить' : 'Поставить оценку';
-    return `<span class="stars rate" role="img" aria-label="Рейтинг: ${r} из 5" title="${hint}" draggable="false">${stars}</span>`;
+    const hint = (r ? 'Рейтинг: ' + r + ' из 5. Нажмите звезду, чтобы изменить, или ту же — чтобы сбросить' : 'Поставить оценку') + '. Клавиши 1–5, 0 — сброс';
+    return `<span class="stars rate" role="group" aria-label="Рейтинг: ${r} из 5. Клавиши 1–5, 0 — сброс" title="${hint}" draggable="false">${stars}</span>`;
   }
   return `<span class="stars" role="img" aria-label="Рейтинг: ${r} из 5" title="Рейтинг: ${r} из 5">${stars}</span>`;
 }
@@ -1895,7 +1918,7 @@ function renderPalette() {
         label: '💾 ' + v.name,
         hint: v.query || 'фильтр',
         score,
-        run: () => { closePalette(); applyView(v.query); }
+        run: () => { closePalette(); applyView(v); }
       });
     });
     addGroup('Сохранённые фильтры', sortByScore(items).slice(0, 6));
@@ -2036,7 +2059,7 @@ function parseLocalDate(str) {
   return isNaN(d.getTime()) ? null : d.getTime();
 }
 function parseQuery(q) {
-  const parts = { text: [], title: [], includeTags: [], excludeTags: [], since: null, until: null };
+  const parts = { text: [], title: [], includeTags: [], excludeTags: [], rating: [], pinned: null, since: null, until: null };
   // «since: 2024-01-01» (пробел после двоеточия) нормализуем в один токен.
   const normalized = String(q == null ? '' : q).replace(/\b(since|until):\s+/gi, '$1:');
   tokenizeQuery(normalized).forEach(tok => {
@@ -2046,6 +2069,21 @@ function parseQuery(q) {
     else if (/^title:/i.test(tok)) {
       const v = tok.slice(6);
       if (v) parts.title.push(v.toLowerCase());
+    }
+    else if (/^rating:/i.test(tok)) {
+      // rating:5, rating:>=4, rating:<3, rating:0 / rating:none — без оценки.
+      const m = tok.slice(7).toLowerCase().match(/^(>=|<=|>|<|=)?(\d+|none|нет|без)$/);
+      if (m) {
+        const none = /^(none|нет|без)$/.test(m[2]);
+        parts.rating.push({ op: m[1] || '=', value: none ? 0 : clampRating(Number(m[2])) });
+      } else parts.text.push(tok);
+    }
+    else if (/^pinned:/i.test(tok)) {
+      // pinned:true — только закреплённые, pinned:false — только обычные.
+      const v = tok.slice(7).toLowerCase();
+      if (/^(true|1|yes|да)$/.test(v)) parts.pinned = true;
+      else if (/^(false|0|no|нет)$/.test(v)) parts.pinned = false;
+      else parts.text.push(tok);
     }
     else if (/^since:/i.test(tok)) {
       const t = parseLocalDate(tok.slice(6));
@@ -2101,6 +2139,19 @@ function matchesSearch(n) {
     const titleLow = (n.title || '').toLowerCase();
     for (const tok of q.title) if (!titleLow.includes(tok)) return false;
   }
+  // Фильтр по оценке: rating:>=4, rating:3, rating:0 (без оценки). Условия складываются по «И».
+  if (q.rating.length > 0) {
+    const r = clampRating(n.rating);
+    for (const c of q.rating) {
+      if (c.op === '>=' && !(r >= c.value)) return false;
+      if (c.op === '<=' && !(r <= c.value)) return false;
+      if (c.op === '>' && !(r > c.value)) return false;
+      if (c.op === '<' && !(r < c.value)) return false;
+      if (c.op === '=' && r !== c.value) return false;
+    }
+  }
+  // Закреплённые: pinned:true / pinned:false.
+  if (q.pinned != null && !!n.pinned !== q.pinned) return false;
   // Фильтр по дате обновления: since:YYYY-MM-DD / until:YYYY-MM-DD
   const up = n.updated || n.created || 0;
   if (q.since != null && up < q.since) return false;
@@ -2145,6 +2196,7 @@ function renderMarkdown(src) {
   const out = [];
   let listType = null;
   let inCode = false;
+  let taskIndex = 0;
   let codeLines = [];
   const flushList = () => {
     if (listType) {
@@ -2210,7 +2262,7 @@ function renderMarkdown(src) {
     if (cbx) {
       if (listType !== 'todo') { flushList(); listType = 'todo'; listBody = []; }
       const box = cbx[1].toLowerCase() === 'x' ? '☑' : '☐';
-      listBody.push('<li data-box="' + box + '">' + inline(cbx[2]) + '</li>');
+      listBody.push('<li data-box="' + box + '" data-task="' + (taskIndex++) + '">' + inline(cbx[2]) + '</li>');
       continue;
     }
     if (oli) {
@@ -2457,6 +2509,11 @@ function notesKeyNav(e) {
   else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); focusAt(idx - 1); }
   else if (e.key === 'Home') { e.preventDefault(); focusAt(0); }
   else if (e.key === 'End') { e.preventDefault(); focusAt(cards.length - 1); }
+  // Оценка с клавиатуры: 1–5 ставят звёзды, 0 сбрасывает (как в редакторе).
+  else if (idx >= 0 && /^[0-5]$/.test(e.key) && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    e.preventDefault();
+    rateNoteFromCard(cards[idx].dataset.noteId, Number(e.key));
+  }
   else if (e.key === 'Enter' && idx >= 0) {
     e.preventDefault();
     const id = cards[idx].dataset.noteId;
@@ -2732,6 +2789,49 @@ function renderNoteView() {
     + '</div>'
     + bodyHtml
     + '</div>';
+  // Задачи в просмотре кликабельны: роль checkbox и клавиатурный фокус.
+  box.querySelectorAll('.nv-body .md-ul.todo li[data-task]').forEach(li => {
+    const done = li.dataset.box === '☑';
+    li.setAttribute('role', 'checkbox');
+    li.setAttribute('aria-checked', done ? 'true' : 'false');
+    li.tabIndex = 0;
+    li.title = done ? 'Снять отметку' : 'Отметить выполненным';
+  });
+}
+// Переключить n-й чекбокс в тексте заметки (в порядке появления в Markdown).
+function toggleTaskLine(body, index) {
+  const lines = String(body || '').split('\n');
+  let n = -1;
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^(\s*[-*]\s+\[)( |x|X)(\]\s+.*)$/);
+    if (!m) continue;
+    n++;
+    if (n !== index) continue;
+    const done = m[2].toLowerCase() === 'x';
+    lines[i] = m[1] + (done ? ' ' : 'x') + m[3];
+    return lines.join('\n');
+  }
+  return null;
+}
+// Отметить/снять задачу из просмотра заметки.
+function toggleNoteTask(noteId, index) {
+  const n = noteById(noteId);
+  if (!n) return false;
+  const next = toggleTaskLine(n.body, index);
+  if (next == null) return false;
+  pushHistory(n);
+  n.body = next;
+  n.updated = Date.now();
+  saveState();
+  saveToFile();
+  renderNoteView();
+  // Обновляем превью карточки, но сохраняем прокрутку списка.
+  const notesEl = document.getElementById('notes');
+  const sc = notesEl ? notesEl.scrollTop : 0;
+  renderNotes();
+  if (notesEl) notesEl.scrollTop = sc;
+  notify('✅ Задача обновлена');
+  return true;
 }
 
 // ---------- Note selection / editor ----------
@@ -3210,9 +3310,13 @@ function saveNote() {
   if (editingId) {
     const n = noteById(editingId);
     if (n) {
-      // Снимок предыдущей версии — только если содержимое реально изменилось.
+      // Снимок предыдущей версии — только если текст реально изменился.
       if (n.title !== title || n.body !== body) pushHistory(n);
-      n.title = title; n.body = body; n.tagIds = ids; n.rating = editorRating; n.updated = Date.now();
+      // Оценка не считается «обновлением» содержимого — как и на карточке,
+      // она не меняет дату и порядок в режиме «Сначала обновлённые».
+      const contentChanged = n.title !== title || n.body !== body || JSON.stringify(n.tagIds || []) !== JSON.stringify(ids);
+      n.title = title; n.body = body; n.tagIds = ids; n.rating = editorRating;
+      if (contentChanged) n.updated = Date.now();
     }
   } else {
     const created = normalizeNote({ title, body, tagIds: ids, rating: editorRating, created: Date.now(), updated: Date.now() });
@@ -3369,6 +3473,23 @@ function hideSearchSuggest() {
 // Список строится по заметкам, уже прошедшим выбранные фильтры (#тэг),
 // поэтому показываются только тэги, сочетающиеся с выбором. Активные
 // (включённые/исключённые) тэги показываются всегда и подсвечиваются.
+// Токен активного фильтра по оценке (для подсветки чипа в фасетах).
+function ratingFacetToken() {
+  const r = getParsedQuery().rating;
+  if (r.length !== 1) return '';
+  const c = r[0];
+  if (c.op === '=') return c.value === 0 ? 'rating:0' : 'rating:' + c.value;
+  if (c.op === '>=') return 'rating:>=' + c.value;
+  return '';
+}
+// Включить/снять фильтр по оценке, не трогая остальные токены запроса.
+function toggleRatingFacet(token) {
+  const toks = tokenizeQuery(searchQuery).filter(t => !/^rating:/i.test(t));
+  if (ratingFacetToken() !== token) toks.push(token);
+  const q = toks.join(' ').trim();
+  document.getElementById('search').value = q;
+  onSearch(q);
+}
 function renderFacets() {
   const body = document.getElementById('facetsBody');
   const cntEl = document.getElementById('facetsCount');
@@ -3377,7 +3498,7 @@ function renderFacets() {
   const q = getParsedQuery();
   const inc = new Set(q.includeTags);
   const exc = new Set(q.excludeTags);
-  const activeCount = inc.size + exc.size;
+  const activeCount = inc.size + exc.size + q.rating.length + (q.pinned != null ? 1 : 0);
   cntEl.textContent = activeCount ? '(' + activeCount + ')' : '';
   if (resetBtn) resetBtn.style.display = activeCount ? 'inline-block' : 'none';
 
@@ -3425,6 +3546,29 @@ function renderFacets() {
   });
 
   body.innerHTML = '';
+  // Быстрые фильтры по оценке — отдельной строкой над тэгами.
+  const ratingWrap = document.createElement('div');
+  ratingWrap.className = 'facets-rating';
+  const activeRating = ratingFacetToken();
+  [
+    { token: 'rating:>=3', label: '★ 3+' },
+    { token: 'rating:>=4', label: '★ 4+' },
+    { token: 'rating:5', label: '★ 5' },
+    { token: 'rating:0', label: 'Без оценки' }
+  ].forEach(chip => {
+    const el = document.createElement('span');
+    el.className = 'facet rating' + (activeRating === chip.token ? ' on' : '');
+    el.textContent = chip.label;
+    el.setAttribute('role', 'button');
+    el.tabIndex = 0;
+    el.title = 'Фильтр по оценке: ' + chip.label;
+    el.onclick = (e) => { e.stopPropagation(); toggleRatingFacet(chip.token); };
+    el.onkeydown = (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); toggleRatingFacet(chip.token); }
+    };
+    ratingWrap.appendChild(el);
+  });
+  body.appendChild(ratingWrap);
   ordered.forEach(({ name, count, kind }) => {
     const el = document.createElement('span');
     el.className = 'facet' + (kind === 'on' ? ' on' : (kind === 'excl' ? ' excl' : ''));
@@ -3502,13 +3646,15 @@ function loadViews() {
 }
 function saveViews(list) { storageSet(VIEWS_KEY, JSON.stringify(list)); }
 // Сохранить текущий запрос как представление.
-function addView(name, query) {
+function addView(name, query, sort, scope) {
   const q = String(query || '').trim();
   if (!q) { notify('⚠️ Сначала задайте фильтр'); return; }
   const list = loadViews();
   const nm = String(name || '').trim() || q;
+  const view = { name: nm, query: q, sort: sort || sortMode, scope: scope || searchScope };
   const existing = list.find(v => v.name === nm);
-  if (existing) existing.query = q; else list.push({ name: nm, query: q });
+  if (existing) { existing.query = q; existing.sort = view.sort; existing.scope = view.scope; }
+  else list.push(view);
   saveViews(list);
   renderViews();
   notify('💾 Представление сохранено: ' + nm);
@@ -3517,8 +3663,17 @@ function deleteView(name) {
   saveViews(loadViews().filter(v => v.name !== name));
   renderViews();
 }
-function applyView(query) {
-  searchScope = 'all';
+// Применить сохранённое представление: запрос, область поиска и сортировка.
+// Строка (старый формат) тоже принимается — как представление с одним запросом.
+function applyView(view) {
+  const v = typeof view === 'string' ? { query: view } : (view || {});
+  const query = v.query || '';
+  if (v.sort && SORT_MODES.some(m => m.id === v.sort)) {
+    sortMode = v.sort;
+    storageSet(SORT_KEY, sortMode);
+    renderSortLabel();
+  }
+  searchScope = v.scope === 'folder' ? 'folder' : 'all';
   document.getElementById('search').value = query;
   onSearch(query);
 }
@@ -3531,17 +3686,18 @@ function renderViews() {
     row.className = 'view-item';
     const nm = document.createElement('span'); nm.className = 'vn'; nm.textContent = v.name;
     const q = document.createElement('span'); q.className = 'vq'; q.textContent = v.query;
+    q.title = 'Сортировка: ' + sortLabel(v.sort || 'updated') + (v.scope === 'folder' ? ', область: в папке' : '');
     const x = document.createElement('span'); x.className = 'vx'; x.textContent = '✕'; x.title = 'Удалить представление';
     x.onclick = (e) => { e.stopPropagation(); deleteView(v.name); };
     row.appendChild(nm); row.appendChild(q); row.appendChild(x);
-    row.onclick = () => applyView(v.query);
+    row.onclick = () => applyView(v);
     list.appendChild(row);
   });
 }
 // Диалог сохранения представления.
 async function promptSaveView() {
   const name = await dialogPrompt('Название представления:', searchQuery || '');
-  if (name) addView(String(name), searchQuery);
+  if (name) addView(String(name), searchQuery, sortMode, searchScope);
 }
 
 // ---------- Theme ----------
@@ -4290,7 +4446,7 @@ function printNotes(notes) {
     tags.textContent = tagsOf(n).join(' · ');
     const body = document.createElement('div');
     body.className = 'print-body';
-    body.textContent = n.body || '';
+    body.innerHTML = renderMarkdown(n.body || '');
     wrap.appendChild(h); wrap.appendChild(tags);
     const rating = ratingText(n.rating);
     if (rating) {
@@ -4344,6 +4500,17 @@ function colorMenuFor(tagName_) {
   items.push({ label: '○ Сбросить цвет', run: () => setTagColor(tagName_, '') });
   submenuFor(items);
 }
+// Подменю оценки заметки: 0 — сброс, 1–5 — звёзды.
+function ratingMenuFor(noteId) {
+  const n = noteById(noteId);
+  if (!n) return;
+  const cur = clampRating(n.rating);
+  const items = [{ label: '☆ Без оценки', run: () => setNoteRating(noteId, 0) }];
+  for (let i = 1; i <= 5; i++) {
+    items.push({ label: (cur === i ? '✓ ' : '') + '★'.repeat(i) + '☆'.repeat(5 - i) + ' — ' + i, run: () => setNoteRating(noteId, i) });
+  }
+  submenuFor(items);
+}
 // Меню для заметки (по id).
 function noteContextMenu(x, y, noteId) {
   const n = noteById(noteId);
@@ -4352,6 +4519,7 @@ function noteContextMenu(x, y, noteId) {
     { label: '✏️ Редактировать', run: () => openEditor(n.id) },
     { label: (n.pinned ? '📌 Открепить' : '📌 Закрепить'), run: () => togglePin(n.id) },
     { label: '📁 Переместить в…', run: () => moveMenuFor(n.id) },
+    { label: '★ Оценка' + (clampRating(n.rating) ? ' (' + clampRating(n.rating) + '/5)' : ''), run: () => ratingMenuFor(n.id) },
     { label: '📑 Дублировать', run: () => duplicateNote(n.id) },
     { label: '🕘 История версий', run: () => historyMenuFor(n.id) },
     '-',
@@ -4420,11 +4588,14 @@ function togglePin(noteId) {
 }
 // Оценка прямо с карточки: повторный клик по той же звезде сбрасывает её.
 // Список не пересобираем (сохраняем прокрутку), кроме сортировки по оценке.
-function rateNoteFromCard(noteId, value) {
+function rateNoteFromCard(noteId, value) { return setNoteRating(noteId, value, true); }
+// Общая установка оценки: toggle — повторный выбор той же звезды сбрасывает в 0.
+function setNoteRating(noteId, value, toggle) {
   const n = noteById(noteId);
   if (!n) return;
   const v = clampRating(value);
-  const next = clampRating(n.rating) === v ? 0 : v;
+  const next = toggle && clampRating(n.rating) === v ? 0 : v;
+  const hadFocus = document.activeElement && document.activeElement.classList && document.activeElement.classList.contains('note-card');
   n.rating = next;
   // Если эта же заметка открыта в редакторе — синхронизируем, чтобы
   // сохранение не вернуло старую оценку.
@@ -4437,6 +4608,9 @@ function rateNoteFromCard(noteId, value) {
   saveToFile();
   if (sortMode === 'rating') {
     renderNotes();
+    // Пересборка списка теряет фокус — возвращаем его на ту же карточку,
+    // чтобы можно было продолжать ставить оценки с клавиатуры.
+    if (hadFocus) { const c = findNoteCard(n.id); if (c) c.focus(); }
   } else {
     const card = findNoteCard(n.id);
     const box = card && card.querySelector('.stars');
@@ -4825,12 +4999,25 @@ function attachNotesEvents($) {
   });
   // Просмотр заметки: делегирование на контейнер, без обработчиков на кнопках.
   $('noteView').addEventListener('click', (e) => {
+    const task = e.target.closest('#noteView .md-ul.todo li[data-task]');
+    if (task) {
+      e.preventDefault();
+      if (viewingId) toggleNoteTask(viewingId, Number(task.dataset.task));
+      return;
+    }
     if (e.target.closest('.nv-close')) { closeNoteView(); return; }
     if (e.target.closest('.nv-edit')) { if (viewingId) openEditor(viewingId); return; }
     const tagEl = e.target.closest('.nv-tags .tag');
     if (tagEl) {
       const name = tagEl.dataset.tag;
       if (name) goToTag(name);
+    }
+  });
+  $('noteView').addEventListener('keydown', (e) => {
+    const task = e.target.closest('.nv-body .md-ul.todo li[data-task]');
+    if (task && (e.key === 'Enter' || e.key === ' ')) {
+      e.preventDefault();
+      if (viewingId) toggleNoteTask(viewingId, Number(task.dataset.task));
     }
   });
   $('notes').addEventListener('contextmenu', (e) => {
@@ -5026,7 +5213,8 @@ if (window) {
     clampRating, starsHtml, ratingText,
     renderAll, renderNotes, renderBreadcrumbs, notesInPath, onSearch, resetNavigation, closeEditor,
     sortNotes, tagCount, tagColor, setTagColor, moveNoteToTag, pushHistory, restoreHistory,
-    setSortMode, sortMenu, printNotes, parseQuery, tokenizeQuery, tagToken, matchesSearch, matchesSearchScoped, fuzzyMatch,    setSearchScope, searchScopeNotes, renderSearchScope, clearSearchField, goToPathRevealed, revealTreePath, paletteScore,
+    setSortMode, sortMenu, printNotes, parseQuery, tokenizeQuery, tagToken, matchesSearch, matchesSearchScoped, fuzzyMatch,
+    setSearchScope, searchScopeNotes, renderSearchScope, clearSearchField, goToPathRevealed, revealTreePath, paletteScore,
     setMdMode, applyMdFormat, updateMdPreview, updateMdWordCount, mdMode,
     updateSearchSuggest, applySearchSuggest, getParsedQuery, tagCounts, notesInFolder, submenuFor,
     closeSidebar, toggleSidebar, storageProbe, showDiagnostics, restoreFromBackup,
@@ -5042,7 +5230,7 @@ if (window) {
     loadTrash, saveTrash, moveToTrash, restoreFromTrash, emptyTrash, trashMenu,
     prepareUndo, undoLastAction,
     openFindBar, closeFindBar, mdFindNext, mdReplaceOne, mdReplaceAll, updateMdToc,
-    humanDate, duplicateNote, exportFound, exportMdText, exportTxtText, rateNoteFromCard, makeSnapshotNow, saveLastView, restoreLastView,
+    humanDate, duplicateNote, exportFound, exportMdText, exportTxtText, rateNoteFromCard, setNoteRating, makeSnapshotNow, toggleTaskLine, toggleNoteTask, ratingFacetToken, toggleRatingFacet, saveLastView, restoreLastView,
     openEditor, saveNote, deleteNote,
     openNoteView, closeNoteView, renderNoteView, goToPath,
     tagsLowerOf, applyTreeState, safeCssColor, scheduleMdPreview, cancelMdPreview,
@@ -5056,6 +5244,7 @@ if (window) {
     get currentPath() { return currentPath; },
     set currentPath(v) { currentPath = Array.isArray(v) ? v : []; },
     get searchScope() { return searchScope; },
+    get searchQuery() { return searchQuery; },
     renderFacets, cycleFacet, toggleFacets, addView, deleteView, applyView, loadViews, resetFacets,
     get collapsed() { return collapsed; },
     get sortMode() { return sortMode; }
