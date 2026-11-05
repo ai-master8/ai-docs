@@ -2527,3 +2527,73 @@ describe('UX редактора и представлений', () => {
   });
 });
 
+
+describe('Доступность и тема', () => {
+  test('цвет текста на плашке тэга выбирается по контрасту', () => {
+    strictEqual(app.tagTextColor('#ffffff'), '#111827', 'на белом — тёмный текст');
+    strictEqual(app.tagTextColor('#000000'), '#fff', 'на чёрном — белый текст');
+    strictEqual(app.tagTextColor('#ffff00'), '#111827', 'на жёлтом — тёмный текст');
+    strictEqual(app.tagTextColor('#1e293b'), '#fff', 'на тёмно-синем — белый текст');
+    strictEqual(app.tagTextColor('rgb(255,255,255)'), '#111827');
+    strictEqual(app.tagTextColor('hsl(0, 0%, 100%)'), '#111827');
+    strictEqual(app.tagTextColor('yellow'), '#111827');
+    strictEqual(app.tagTextColor(''), '#fff', 'неизвестный цвет — безопасный белый');
+  });
+
+  test('карточка красит текст тэга контрастно фону', () => {
+    seed(
+      [{ id: 't1', name: 'светлый', color: '#ffff00' }],
+      [{ id: 'n1', title: 'Заметка', body: '', tagIds: ['t1'], updated: 1 }]
+    );
+    app.goToPath(['светлый']);
+    const tag = document.querySelector('#notes .tag');
+    // jsdom нормализует hex в rgb().
+    strictEqual(tag.style.color, 'rgb(17, 24, 39)');
+  });
+
+  test('счётчик результатов объявляется через aria-live', () => {
+    seed([], [
+      { id: 'n1', title: 'Первая', tagIds: [], updated: 1 },
+      { id: 'n2', title: 'Вторая', tagIds: [], updated: 2 }
+    ]);
+    app.renderAll();
+    const live = document.getElementById('liveStatus');
+    strictEqual(live.getAttribute('role'), 'status');
+    strictEqual(live.getAttribute('aria-live'), 'polite');
+    strictEqual(live.textContent, '2 заметок');
+    app.onSearch('нет такого');
+    strictEqual(live.textContent, '0 найдено');
+  });
+
+  test('тема переключается по кругу: светлая → тёмная → авто', () => {
+    app.state.theme = 'light';
+    app.toggleTheme();
+    strictEqual(app.state.theme, 'dark');
+    strictEqual(document.documentElement.getAttribute('data-theme'), 'dark');
+    strictEqual(app.storageGet('noteTreeTheme'), 'dark');
+
+    app.toggleTheme();
+    strictEqual(app.state.theme, 'auto', 'третье состояние — авто');
+    strictEqual(app.storageGet('noteTreeTheme'), 'auto');
+    // Без matchMedia (jsdom) авто-тема считается светлой.
+    strictEqual(document.documentElement.getAttribute('data-theme'), 'light');
+
+    app.toggleTheme();
+    strictEqual(app.state.theme, 'light');
+    strictEqual(document.documentElement.getAttribute('data-theme'), 'light');
+  });
+
+  test('после удаления фокус переходит на соседнюю карточку', async () => {
+    seed([], [
+      { id: 'n1', title: 'Первая', tagIds: [], updated: 1 },
+      { id: 'n2', title: 'Вторая', tagIds: [], updated: 2 }
+    ]);
+    app.renderAll();
+    const p = app.deleteNote('n1');
+    document.getElementById('dialogOkBtn').click();
+    await p;
+    strictEqual(app.state.notes.length, 1);
+    ok(document.activeElement.classList.contains('note-card'), 'фокус на карточке');
+    strictEqual(document.activeElement.dataset.noteId, 'n2');
+  });
+});
