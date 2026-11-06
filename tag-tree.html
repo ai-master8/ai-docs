@@ -5668,40 +5668,64 @@ const FILE_HANDLE_DB = 'noteTreeFileHandle';
 const FILE_NAME_KEY = 'noteTreeFileName';
 let hasRestoredHandle = false;
 
-// Сохранить дескриптор привязанного файла в IndexedDB (умеет сериализовать handle).
-// Позволяет восстановить привязку после перезагрузки в поддерживающих браузерах.
-function persistFileHandle(handle) {
-  try {
-    if (typeof indexedDB === 'undefined') return;
-    const req = indexedDB.open(FILE_HANDLE_DB, 1);
-    req.onupgradeneeded = () => req.result.createObjectStore('handles');
-    req.onsuccess = () => {
-      const db = req.result;
-      const tx = db.transaction('handles', 'readwrite');
-      tx.objectStore('handles').put(handle, 'main');
-      tx.oncomplete = () => db.close();
-    };
-  } catch (e) { /* IndexedDB недоступен — привязка не переживёт перезагрузку */ }
-}
-// Достать ранее сохранённый дескриптор из IndexedDB.
-function loadStoredFileHandle() {
-  return new Promise((resolve) => {
+// Открыть базу дескриптора файла. Единая точка: объектное хранилище создаётся
+// в onupgradeneeded, поэтому открытие пустой базы не оставляет её без store
+// (раньше destroyFileHandle открывал БД без upgrade и портил последующую запись).
+function openFileHandleDb() {
+  return new Promise((resolve, reject) => {
     try {
       if (typeof indexedDB === 'undefined') return resolve(null);
       const req = indexedDB.open(FILE_HANDLE_DB, 1);
-      req.onupgradeneeded = () => req.result.createObjectStore('handles');
-      req.onerror = () => resolve(null);
-      req.onsuccess = () => {
+      req.onupgradeneeded = () => {
         const db = req.result;
-        const get = db.transaction('handles', 'readonly').objectStore('handles').get('main');
-        get.onerror = () => resolve(null);
-        get.onsuccess = () => {
-          db.close();
-          resolve(get.result || null);
-        };
+        if (!db.objectStoreNames.contains('handles')) db.createObjectStore('handles');
       };
-    } catch (e) { resolve(null); }
+      req.onblocked = () => reject(new Error('file handle db blocked'));
+      req.onerror = () => reject(req.error || new Error('file handle db open failed'));
+      req.onsuccess = () => resolve(req.result);
+    } catch (e) { reject(e); }
   });
+}
+// Выполнить одну транзакцию над store 'handles' и дождаться её завершения.
+// Ошибки не вылетают наружу: вызывающий решает, что делать с false.
+function fileHandleTx(mode, fn) {
+  return openFileHandleDb().then(db => new Promise((resolve, reject) => {
+    if (!db) return resolve(false);
+    let tx;
+    try { tx = db.transaction('handles', mode); } catch (e) { db.close(); return reject(e); }
+    const fail = () => { db.close(); reject((tx && tx.error) || new Error('file handle tx failed')); };
+    tx.onerror = fail;
+    tx.onabort = fail;
+    tx.oncomplete = () => { db.close(); resolve(true); };
+    try { fn(tx.objectStore('handles')); } catch (e) { try { tx.abort(); } catch (e2) {} fail(); }
+  }));
+}
+// Сохранить дескриптор привязанного файла в IndexedDB (умеет сериализовать handle).
+// Позволяет восстановить привязку после перезагрузки в поддерживающих браузерах.
+// Возвращает true, если запись подтверждена базой.
+async function persistFileHandle(handle) {
+  try {
+    return await fileHandleTx('readwrite', store => { store.put(handle, 'main'); });
+  } catch (e) { return false; }
+}
+// Достать ранее сохранённый дескриптор из IndexedDB.
+async function loadStoredFileHandle() {
+  let db = null;
+  try {
+    db = await openFileHandleDb();
+    if (!db) return null;
+    return await new Promise((resolve) => {
+      let tx;
+      try { tx = db.transaction('handles', 'readonly'); } catch (e) { db.close(); return resolve(null); }
+      const get = tx.objectStore('handles').get('main');
+      get.onerror = () => { db.close(); resolve(null); };
+      get.onsuccess = () => resolve(get.result || null);
+      tx.oncomplete = () => db.close();
+    });
+  } catch (e) {
+    if (db) { try { db.close(); } catch (e2) {} }
+    return null;
+  }
 }
 
 // Сериализация всех данных в единый JSON (для файла и экспорта).
@@ -5764,11 +5788,14 @@ async function chooseFile() {
         suggestedName: 'tag-tree.json',
         types: [{ description: 'JSON', accept: { 'application/json': ['.json'] } }]
       });
-      destroyFileHandle();
-      persistFileHandle(fileHandle);
-      storageSet(FILE_NAME_KEY, fileHandle.name || '');
+      // put('main') сам перезаписывает прошлый дескриптор — отдельное удаление
+      // не нужно (раньше delete и put гонялись и могли оставить старый handle).
+      const persisted = await persistFileHandle(fileHandle);
+      try { storageSet(FILE_NAME_KEY, fileHandle.name || ''); } catch (e) {}
       saveToFile();
-      notify('💾 Файл привязан — теперь изменения сохраняются в него автоматически');
+      notify(persisted
+        ? '💾 Файл привязан — теперь изменения сохраняются в него автоматически'
+        : '💾 Файл привязан на эту сессию — после перезапуска выберите его снова');
       return;
     } catch (err) {
       // Пользователь отменил выбор или API не сработал
@@ -5824,7 +5851,7 @@ async function writeToFileHandle(handle, payload, savedState) {
     const detached = /NotAllowedError|NotFoundError|Failed to execute|createWritable|permission/i.test(msg);
     if (detached && fileHandle === handle) {
       fileHandle = null;
-      destroyFileHandle();
+      await destroyFileHandle();
       notify('⚠️ Файл недоступен (перемещён/удалён). Привяжите файл заново.');
       const ok = await dialogConfirm('Файл данных недоступен. Перепривязать файл?');
       if (ok) chooseFile();
@@ -6782,28 +6809,53 @@ window.addEventListener('focus', () => {
 });
 
 // Снять привязку файла (убрать сохранённый дескриптор).
-function destroyFileHandle() {
-  try {
-    if (typeof indexedDB === 'undefined') return;
-    const req = indexedDB.open(FILE_HANDLE_DB, 1);
-    req.onsuccess = () => {
-      const db = req.result;
-      const tx = db.transaction('handles', 'readwrite');
-      tx.objectStore('handles').delete('main');
-      tx.oncomplete = () => db.close();
-    };
-  } catch (e) {}
+async function destroyFileHandle() {
+  try { await fileHandleTx('readwrite', store => { store.delete('main'); }); } catch (e) { /* база недоступна */ }
   try { storageSet(FILE_NAME_KEY, ''); } catch (e) {}
 }
+// Общая проверка архива для UI-импорта и чтения привязанного файла:
+// разбор (строка — JSON, объект — уже разобранные данные) + строгая структура
+// (validateImport). Возвращает { ok, data, count } или { ok:false, reason }.
+function parseImportJson(input) {
+  let data = input;
+  if (typeof input === 'string') {
+    try { data = JSON.parse(input); } catch (e) { return { ok: false, reason: 'bad json' }; }
+  }
+  const check = validateImport(data);
+  if (!check.ok) return { ok: false, reason: check.reason };
+  return { ok: true, data, count: check.count };
+}
+// Человекочитаемая причина отказа импорта.
+function importFailMessage(reason) {
+  if (reason === 'too large') return '⚠️ Файл слишком большой для импорта (больше 50 МБ)';
+  if (reason === 'too many notes') return '⚠️ Слишком много заметок в файле (больше ' + IMPORT_MAX_NOTES + ')';
+  if (reason === 'bad json') return '⚠️ Файл не является корректным JSON';
+  return '⚠️ Файл повреждён или имеет неверный формат';
+}
 // Прочитать данные из привязанного файла и заменить состояние.
-async function readFromFile() {
-  if (!fileHandle) return false;
+// Те же предохранители, что у обычного импорта: размер и validateImport.
+// handle можно передать явно (тесты/перепривязка), иначе берётся текущий.
+async function readFromFile(handle) {
+  const target = handle || fileHandle;
+  if (!target) return false;
   try {
-    const file = await fileHandle.getFile();
+    const file = await target.getFile();
+    if (file.size > IMPORT_MAX_BYTES) {
+      notify(importFailMessage('too large'));
+      return false;
+    }
     const text = await file.text();
-    const data = JSON.parse(text);
-    if (!isValidData(data)) { notify('⚠️ Файл имеет неверный формат'); return false; }
-    state.notes = applyData(data); // применяет таблицу тэгов и миграцию
+    const parsed = parseImportJson(text);
+    if (!parsed.ok) {
+      notify(importFailMessage(parsed.reason));
+      return false;
+    }
+    state.notes = applyData(parsed.data); // применяет таблицу тэгов и миграцию
+    // Файл только что прочитан — это его актуальная версия. Обновляем метки,
+    // иначе следующий focus счёл бы файл изменённым извне и снова спросил.
+    lastFileWriteTs = file.lastModified || Date.now();
+    lastWrittenSize = file.size;
+    fileConflictSkip = file.size + ':' + file.lastModified;
     clearUndoHistory();
     resetNavigation();
     saveState();
@@ -6864,14 +6916,63 @@ function makeConflictCopy(n) {
   });
   return copy;
 }
+// Слить таблицу тэгов локального архива с уже применённой входящей таблицей.
+// Возвращает Map «старый id -> канонический id», чтобы ссылки локальных заметок
+// не потерялись. Правила:
+//   - одинаковое имя (без учёта регистра) — один тэг, цвет переносится;
+//   - одинаковый id, но другое имя — локальному тэгу выдаётся новый id,
+//     иначе ссылки заметок начали бы указывать на чужой тэг.
+// Входящие тэги уже лежат в state.tags (их выставил applyData).
+function mergeTagTables(oldTags) {
+  const remap = new Map();
+  const byName = new Map(); // lower(name) -> запись
+  const byId = new Map();   // id -> запись
+  state.tags.forEach(t => {
+    if (!t || !t.id) return;
+    byName.set(String(t.name || '').toLowerCase(), t);
+    byId.set(t.id, t);
+  });
+  oldTags.forEach(t => {
+    if (!t || !t.id || typeof t.name !== 'string') return;
+    const name = t.name.trim();
+    if (!name) return;
+    const ln = name.toLowerCase();
+    const sameName = byName.get(ln);
+    if (sameName) {
+      remap.set(t.id, sameName.id);
+      if (!sameName.color && t.color) sameName.color = t.color;
+      return;
+    }
+    let id = t.id;
+    if (byId.has(id)) id = tagUid(); // id занят тэгом с другим именем
+    const rec = { id, name };
+    if (t.color) rec.color = t.color;
+    state.tags.push(rec);
+    byName.set(ln, rec);
+    byId.set(id, rec);
+    remap.set(t.id, id);
+  });
+  return remap;
+}
 // Слияние по id. С preserveConflicts (разрешение конфликта вкладок) проигравшая
 // версия не выбрасывается, а сохраняется отдельной заметкой. Обычный импорт
-// работает как раньше: побеждает более новый updated.
+// работает как раньше: побеждает более новый updated. Таблицы тэгов обеих
+// сторон объединяются, а ссылки локальных заметок перемапливаются — иначе
+// applyData заменил бы таблицу и локальные заметки остались бы без тэгов.
 function mergeImportedData(data, opts) {
   const preserve = !!(opts && opts.preserveConflicts);
+  const oldTags = state.tags.map(t => ({ ...t }));
   const oldNotes = state.notes.slice();
   const incoming = applyData(data);
-  const byId = new Map(oldNotes.map(n => [n.id, n]));
+  const remap = mergeTagTables(oldTags);
+  rebuildTagIndex();
+  // Локальные заметки переводим на канонические id объединённой таблицы.
+  const local = oldNotes.map(n => {
+    if (!n.tagIds || !n.tagIds.length) return n;
+    const ids = pruneTagIds(n.tagIds.map(id => { const v = remap.get(id); return v != null ? v : id; }));
+    return ids.join('\u0001') === n.tagIds.join('\u0001') ? n : { ...n, tagIds: ids };
+  });
+  const byId = new Map(local.map(n => [n.id, n]));
   let added = 0, updated = 0;
   const conflicts = [];
   incoming.forEach(n => {
@@ -6960,24 +7061,20 @@ function importData() {
     reader.onerror = () => { notify('⚠️ Не удалось прочитать файл'); fi.value = ''; };
     reader.onload = async e => {
       try {
-        let data;
-        try {
-          data = JSON.parse(e.target.result);
-        } catch (jsonErr) {
-          // Не JSON — пробуем Markdown/TXT: заголовки «# …», тэги «#тэг», оценка.
-          const mdNotes = parseMarkdownImport(e.target.result);
-          if (!mdNotes.length) throw jsonErr;
-          data = { version: 2, tags: [], notes: mdNotes };
+        const text = String(e.target.result || '');
+        let parsed = parseImportJson(text);
+        // Не JSON — пробуем Markdown/TXT: заголовки «# …», тэги «#тэг», оценка.
+        if (!parsed.ok && parsed.reason === 'bad json') {
+          const mdNotes = parseMarkdownImport(text);
+          if (mdNotes.length) parsed = parseImportJson({ version: 2, tags: [], notes: mdNotes });
         }
-        const check = validateImport(data);
-        if (!check.ok) {
-          notify(check.reason === 'too many notes'
-            ? '⚠️ Слишком много заметок в файле (больше ' + IMPORT_MAX_NOTES + ')'
-            : '⚠️ Файл повреждён или имеет неверный формат');
+        if (!parsed.ok) {
+          notify(importFailMessage(parsed.reason));
           fi.value = '';
           return;
         }
-        const count = check.count;
+        const data = parsed.data;
+        const count = parsed.count;
         const choice = await dialogShow({
           title: 'Импорт данных',
           message: `В файле ${count} записей.\n\n«Заменить» — полностью заменить текущие данные.\n«Объединить» — добавить новые заметки, а совпадающие по id обновить, если версия в файле новее.`,
@@ -7773,6 +7870,8 @@ if (window) {
     removeOrphanTags, findSimilarTagNames, highlightSimilarTags,
     openPalette, closePalette, renderPalette, paletteKey, paletteCommands, dialogShow, dialogClose,
     loadSnapshots, saveSnapshots, maybeSnapshot, restoreSnapshot, snapshotMenu, checkFileConflict,
+    mergeTagTables, parseImportJson, importFailMessage, readFromFile,
+    persistFileHandle, loadStoredFileHandle, destroyFileHandle,
     ensureSnapshotsLoaded, ensureTrashLoaded, markTabStale, requestTabConflict, readFreshState,
     loadTrash, saveTrash, moveToTrash, restoreFromTrash, emptyTrash, trashMenu,
     prepareUndo, undoLastAction, redoLastAction, clearUndoHistory,
