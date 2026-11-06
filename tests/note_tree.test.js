@@ -584,16 +584,37 @@ describe('Интеграция редактора и рендера', () => {
 });
 
 describe('Тэги новой заметки и рейтинг', () => {
-  test('новая заметка в папке создаётся без тэгов', () => {
+  test('новая заметка в папке наследует тэги выбранной ветки', () => {
     seed([{ id: 't1', name: 'работа' }], [{ id: 'n1', title: 'Старая', tagIds: ['t1'] }]);
     app.currentPath = ['работа'];
     app.openEditor();
-    strictEqual(document.querySelectorAll('#tagBadges .tag-badge').length, 0, 'бейджей тэгов нет');
+    const badges = [...document.querySelectorAll('#tagBadges .tag-badge')];
+    strictEqual(badges.length, 1, 'бейдж тэга показан сразу');
+    strictEqual(badges[0].textContent.replace('✕', '').trim(), 'работа');
     document.getElementById('fTitle').value = 'Новая';
     app.saveNote();
     const created = app.state.notes.find(n => n.title === 'Новая');
     ok(created, 'заметка создана');
-    deepEqual(created.tagIds, [], 'тэги папки не унаследованы');
+    deepEqual(app.tagsOf(created), ['работа'], 'тэг папки унаследован');
+  });
+
+  test('многоуровневая ветка назначает все тэги пути, корень — ни одного', () => {
+    seed(
+      [{ id: 't1', name: 'работа' }, { id: 't2', name: 'проект' }],
+      []
+    );
+    app.currentPath = ['работа', 'проект'];
+    app.openEditor();
+    document.getElementById('fTitle').value = 'В ветке';
+    app.saveNote();
+    const nested = app.state.notes.find(n => n.title === 'В ветке');
+    deepEqual(app.tagsOf(nested).sort(), ['проект', 'работа']);
+    app.currentPath = [];
+    app.openEditor();
+    document.getElementById('fTitle').value = 'В корне';
+    app.saveNote();
+    const root = app.state.notes.find(n => n.title === 'В корне');
+    deepEqual(root.tagIds, [], 'в корне заметка без тэгов');
   });
 
   test('рейтинг ставится звёздами, сохраняется и рисуется в карточке и просмотре', () => {

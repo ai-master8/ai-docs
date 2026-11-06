@@ -4417,9 +4417,9 @@ function openEditorPanel(id) {
     renderNoteView(); // сохраняет раскрытую панель даже без выбранной заметки
   }
   editorOpen = true;
-  // Новая заметка создаётся без тэгов: текущая папка — это место просмотра,
-  // а не набор тэгов будущей заметки.
-  currentTags = n ? tagsOf(n) : [];
+  // Новая заметка наследует тэги выбранного пункта дерева: путь — это набор
+  // тэгов, которым должна соответствовать заметка (корень — без тэгов).
+  currentTags = n ? tagsOf(n) : currentPath.slice();
   editorRating = n ? clampRating(n.rating) : 0;
   renderRatingInput();
   const titleEl = document.getElementById('editorTitle');
