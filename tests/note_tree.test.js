@@ -2624,3 +2624,172 @@ describe('Авто-тема и системная настройка', () => {
     }
   });
 });
+
+describe('Импорт: объединение таблиц тэгов (P0)', () => {
+  test('локальные тэги не теряются при объединении с чужими', () => {
+    seed(
+      [{ id: 't1', name: 'работа' }],
+      [{ id: 'n1', title: 'Локальная', tagIds: ['t1'] }]
+    );
+    const res = app.mergeImportedData({
+      tags: [{ id: 't9', name: 'дом' }],
+      notes: [{ id: 'n2', title: 'Из файла', tagIds: ['t9'] }]
+    });
+    strictEqual(res.added, 1);
+    strictEqual(app.state.tags.length, 2, 'обе таблицы объединены');
+    deepEqual(app.tagsOf(app.noteById('n1')), ['работа'], 'локальная заметка сохранила тэг');
+    deepEqual(app.tagsOf(app.noteById('n2')), ['дом'], 'входящая заметка получила свой тэг');
+  });
+
+  test('одинаковое имя с разными id сливается в один тэг, цвет переносится', () => {
+    seed(
+      [{ id: 't1', name: 'Работа' }],
+      [{ id: 'n1', title: 'Локальная', tagIds: ['t1'] }]
+    );
+    app.mergeImportedData({
+      tags: [{ id: 't9', name: 'работа', color: '#8b5cf6' }],
+      notes: [{ id: 'n2', title: 'Из файла', tagIds: ['t9'] }]
+    });
+    strictEqual(app.state.tags.length, 1, 'тэг с тем же именем не дублируется');
+    strictEqual(app.state.tags[0].id, 't9');
+    strictEqual(app.state.tags[0].color, '#8b5cf6', 'цвет перенесён на канонический тэг');
+    deepEqual(app.tagsOf(app.noteById('n1')), ['работа']);
+    deepEqual(app.tagsOf(app.noteById('n2')), ['работа']);
+  });
+
+  test('одинаковый id с разными именами не подменяет локальный тэг', () => {
+    seed(
+      [{ id: 't1', name: 'работа' }],
+      [{ id: 'n1', title: 'Локальная', tagIds: ['t1'] }]
+    );
+    app.mergeImportedData({
+      tags: [{ id: 't1', name: 'дом' }],
+      notes: [{ id: 'n2', title: 'Из файла', tagIds: ['t1'] }]
+    });
+    const localNote = app.noteById('n1');
+    const remoteNote = app.noteById('n2');
+    deepEqual(app.tagsOf(localNote), ['работа'], 'локальная заметка осталась на своём имени');
+    deepEqual(app.tagsOf(remoteNote), ['дом'], 'входящая заметка видит входящее имя');
+    ok(localNote.tagIds[0] !== 't1', 'конфликтный id заменён новым');
+    strictEqual(app.state.tags.filter(t => t.name.toLowerCase() === 'работа').length, 1);
+    strictEqual(app.state.tags.filter(t => t.name.toLowerCase() === 'дом').length, 1);
+  });
+
+  test('цвет локального тэга сохраняется, если у входящего его нет', () => {
+    seed(
+      [{ id: 't1', name: 'работа', color: '#22c55e' }],
+      [{ id: 'n1', title: 'Локальная', tagIds: ['t1'] }]
+    );
+    app.mergeImportedData({
+      tags: [{ id: 't9', name: 'Работа' }],
+      notes: []
+    });
+    strictEqual(app.state.tags.length, 1);
+    strictEqual(app.state.tags[0].color, '#22c55e');
+  });
+});
+
+describe('Привязка файла: дескриптор в IndexedDB (P1)', () => {
+  test('persist/load/delete используют одну базу и подтверждённую запись', async () => {
+    window.indexedDB = makeFakeIdb();
+    const handle = { name: 'tag-tree.json' };
+    strictEqual(await app.persistFileHandle(handle), true, 'запись подтверждена');
+    deepEqual(await app.loadStoredFileHandle(), handle, 'дескриптор читается обратно');
+    await app.destroyFileHandle();
+    strictEqual(await app.loadStoredFileHandle(), null, 'после удаления дескриптора нет');
+  });
+
+  test('открытие пустой базы создаёт объектное хранилище handles', async () => {
+    const stores = new Set();
+    const db = {
+      objectStoreNames: { contains: n => stores.has(n) },
+      createObjectStore: n => { stores.add(n); return {}; },
+      transaction: () => {
+        const tx = {};
+        tx.objectStore = () => ({ delete() { return {}; }, put() { return {}; }, get() { return {}; } });
+        setTimeout(() => { if (tx.oncomplete) tx.oncomplete(); }, 0);
+        return tx;
+      },
+      close() {}
+    };
+    window.indexedDB = {
+      open() {
+        const req = {};
+        setTimeout(() => {
+          req.result = db;
+          if (req.onupgradeneeded) req.onupgradeneeded();
+          if (req.onsuccess) req.onsuccess();
+        }, 0);
+        return req;
+      }
+    };
+    await app.destroyFileHandle();
+    deepEqual([...stores], ['handles'], 'store создан при первом открытии');
+  });
+
+  test('недоступная база не роняет сохранение привязки', async () => {
+    window.indexedDB = { open() { throw new Error('boom'); } };
+    strictEqual(await app.persistFileHandle({ name: 'x' }), false);
+    strictEqual(await app.loadStoredFileHandle(), null);
+    await app.destroyFileHandle();
+  });
+});
+
+describe('Импорт: единые предохранители (P2)', () => {
+  test('parseImportJson отвергает битый JSON и неверную структуру', () => {
+    deepEqual(app.parseImportJson('не json'), { ok: false, reason: 'bad json' });
+    deepEqual(app.parseImportJson({ notes: 'строка' }), { ok: false, reason: 'bad format' });
+    deepEqual(app.parseImportJson({ notes: [{ title: 42 }] }).reason, 'bad title 0');
+    const good = app.parseImportJson({ tags: [], notes: [{ id: 'n1', title: 'ok' }] });
+    strictEqual(good.ok, true);
+    strictEqual(good.count, 1);
+  });
+
+  test('parseImportJson ограничивает число заметок и объясняет отказ', () => {
+    const many = { tags: [], notes: Array.from({ length: 50001 }, (_, i) => ({ id: 'n' + i })) };
+    const res = app.parseImportJson(many);
+    strictEqual(res.ok, false);
+    strictEqual(res.reason, 'too many notes');
+    ok(app.importFailMessage(res.reason).includes('50000'));
+  });
+
+  test('readFromFile не читает файл больше 50 МБ', async () => {
+    let textCalled = false;
+    const size = 50 * 1024 * 1024 + 1;
+    const handle = {
+      getFile: async () => ({
+        size,
+        lastModified: 1,
+        text: async () => { textCalled = true; return '{}'; }
+      })
+    };
+    strictEqual(await app.readFromFile(handle), false);
+    strictEqual(textCalled, false, 'содержимое даже не читалось');
+  });
+
+  test('readFromFile отвергает повреждённые данные, не затирая архив', async () => {
+    seed([], [{ id: 'n1', title: 'Своя заметка', tagIds: [] }]);
+    const makeHandle = text => ({
+      getFile: async () => ({ size: text.length, lastModified: 1, text: async () => text })
+    });
+    strictEqual(await app.readFromFile(makeHandle('не json')), false);
+    strictEqual(await app.readFromFile(makeHandle(JSON.stringify({ notes: 'нет' }))), false);
+    strictEqual(app.state.notes.length, 1, 'данные остались прежними');
+    strictEqual(app.noteById('n1').title, 'Своя заметка');
+  });
+
+  test('readFromFile загружает валидный архив', async () => {
+    const payload = JSON.stringify({
+      version: 2,
+      tags: [{ id: 't1', name: 'работа' }],
+      notes: [{ id: 'n1', title: 'Из файла', body: 'текст', tagIds: ['t1'], updated: 5 }]
+    });
+    const handle = {
+      getFile: async () => ({ size: payload.length, lastModified: 10, text: async () => payload })
+    };
+    strictEqual(await app.readFromFile(handle), true);
+    strictEqual(app.state.notes.length, 1);
+    strictEqual(app.noteById('n1').title, 'Из файла');
+    deepEqual(app.tagsOf(app.noteById('n1')), ['работа']);
+  });
+});
